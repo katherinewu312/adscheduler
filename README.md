@@ -27,7 +27,7 @@ python scripts/run_schedule_benchmark.py --include-auto --warmup-steps 3
 
 Add `--print-jaxpr` if you want to dump the full text IR.
 
-## How This Maps to Your Two Steps
+## Explanation
 
 ### Step 1: Trace a MAML-style training step to `jaxpr`
 
