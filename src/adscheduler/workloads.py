@@ -155,7 +155,7 @@ def _make_poisson_pinn_strategy_workload(
 ) -> DerivativeWorkload:
     params = _init_mlp_params(
         seed=seed,
-        layer_dims=(2, 16, 16, 1),
+        layer_dims=(2, 64, 64, 64, 64, 64, 64, 1),
     )
     grid = jnp.linspace(0.1, 0.9, 5, dtype=jnp.float32)
     mesh_x, mesh_y = jnp.meshgrid(grid, grid, indexing="ij")
@@ -226,7 +226,8 @@ def _make_poisson_pinn_strategy_workload(
         name=name,
         description=(
             "Training loss and parameter gradient for a Poisson PINN with "
-            "u=x(1-x)y(1-y)NN(x,y), where the loss differentiates through "
+            "u=x(1-x)y(1-y)NN(x,y), a 6-layer tanh MLP with hidden size 64, "
+            "where the loss differentiates through "
             f"second input derivatives via {_poisson_pinn_strategy_description(strategy)}"
             "."
         ),

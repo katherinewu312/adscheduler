@@ -31,8 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outer-steps", type=int, default=30)
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--grid-size", type=int, default=5)
-    parser.add_argument("--hidden-dim", type=int, default=16)
-    parser.add_argument("--hidden-layers", type=int, default=2)
+    parser.add_argument("--input-dim", type=int, default=2)
+    parser.add_argument("--hidden-layers", type=int, default=6)
+    parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--activation", choices=("tanh",), default="tanh")
+    parser.add_argument("--output-dim", type=int, default=1)
     parser.add_argument("--target-error", type=float, default=1e-4)
 
     parser.add_argument(
@@ -105,8 +108,11 @@ def main() -> None:
         outer_steps=args.outer_steps,
         eval_every=args.eval_every,
         grid_size=args.grid_size,
-        hidden_dim=args.hidden_dim,
+        input_dim=args.input_dim,
         hidden_layers=args.hidden_layers,
+        hidden_dim=args.hidden_dim,
+        activation=args.activation,
+        output_dim=args.output_dim,
         target_max_abs_error=args.target_error,
     )
 
@@ -127,8 +133,9 @@ def main() -> None:
     print(f"outer_steps: {args.outer_steps} eval_every: {args.eval_every}")
     print(
         "workload: "
-        f"grid_size={args.grid_size} hidden_dim={args.hidden_dim} "
-        f"hidden_layers={args.hidden_layers}"
+        f"grid_size={args.grid_size} input_dim={args.input_dim} "
+        f"hidden_layers={args.hidden_layers} hidden_dim={args.hidden_dim} "
+        f"activation={args.activation} output_dim={args.output_dim}"
     )
     print(f"target_max_abs_error: {args.target_error}")
     if args.include_auto:

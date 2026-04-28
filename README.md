@@ -63,8 +63,8 @@ python3 scripts/run_workload_benchmark.py \
   --workload poisson_pinn_jvp_grad \
   --workload poisson_pinn_jet \
   --workload poisson_pinn_auto \
-  --warmup-runs 3 \
-  --runs 10
+  --warmup-runs 5 \
+  --runs 100
 ```
 
 Run fixed Laplacian schedule benchmarks:
@@ -96,6 +96,11 @@ Run fixed PINN schedule benchmarks:
 python3 scripts/run_pinn_schedule_benchmark.py \
   --schedule ror --schedule for --schedule jacrev --schedule jacfwd \
   --schedule ror_remat --schedule for_remat --schedule jacrev_remat --schedule jacfwd_remat \
+  --input-dim 2 \
+  --hidden-layers 6 \
+  --hidden-dim 64 \
+  --activation tanh \
+  --output-dim 1 \
   --outer-steps 30 \
   --eval-every 10
 ```

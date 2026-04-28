@@ -46,8 +46,11 @@ class PINNBenchmarkConfig:
     outer_steps: int = 30
     eval_every: int = 10
     grid_size: int = 5
-    hidden_dim: int = 16
-    hidden_layers: int = 2
+    input_dim: int = 2
+    hidden_layers: int = 6
+    hidden_dim: int = 64
+    activation: str = "tanh"
+    output_dim: int = 1
     target_max_abs_error: float = 1e-4
 
 
@@ -543,7 +546,11 @@ def _initialize_pinn_state(
 
 def _init_pinn_params(config: PINNBenchmarkConfig) -> PINNParams:
     key = jax.random.PRNGKey(config.seed)
-    layer_dims = [2] + [config.hidden_dim] * config.hidden_layers + [1]
+    layer_dims = (
+        [config.input_dim]
+        + [config.hidden_dim] * config.hidden_layers
+        + [config.output_dim]
+    )
     keys = jax.random.split(key, len(layer_dims) - 1)
     layers = []
     for layer_key, in_dim, out_dim in zip(keys, layer_dims[:-1], layer_dims[1:]):
@@ -555,6 +562,8 @@ def _init_pinn_params(config: PINNBenchmarkConfig) -> PINNParams:
 
 
 def _make_collocation_points(config: PINNBenchmarkConfig, *, fold: int) -> Array:
+    if config.input_dim != 2:
+        raise ValueError("Poisson PINN collocation currently requires input_dim=2")
     base_grid = jnp.linspace(0.1, 0.9, config.grid_size, dtype=jnp.float32)
     if fold == 0:
         grid = base_grid
@@ -726,10 +735,16 @@ def _validate_config(config: PINNBenchmarkConfig) -> None:
         raise ValueError("eval_every must be >= 1")
     if config.grid_size < 2:
         raise ValueError("grid_size must be >= 2")
+    if config.input_dim != 2:
+        raise ValueError("input_dim must be 2 for the Poisson PINN workload")
     if config.hidden_dim < 1:
         raise ValueError("hidden_dim must be >= 1")
     if config.hidden_layers < 1:
         raise ValueError("hidden_layers must be >= 1")
+    if config.activation != "tanh":
+        raise ValueError("Only activation='tanh' is currently supported")
+    if config.output_dim != 1:
+        raise ValueError("output_dim must be 1 for the Poisson PINN workload")
     if config.target_max_abs_error < 0:
         raise ValueError("target_max_abs_error must be >= 0")
 
