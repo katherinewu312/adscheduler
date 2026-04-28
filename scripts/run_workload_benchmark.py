@@ -19,17 +19,22 @@ if str(SRC_DIR) not in sys.path:
 import jax
 import jax.tree_util as jtu
 
+from adscheduler.stablehlo_passes import (
+    lower_laplacian_schedule_to_stablehlo,
+    lower_pinn_schedule_to_stablehlo,
+    lower_workload_to_stablehlo,
+    run_stablehlo_pass_pipeline,
+    score_stablehlo_optimization_surface,
+)
 from adscheduler.laplacian_benchmark import (
     LaplacianBenchmarkConfig,
     available_laplacian_schedule_names,
     build_laplacian_schedule_fn,
-    choose_laplacian_schedule_via_warmup,
 )
 from adscheduler.pinn_benchmark import (
     PINNBenchmarkConfig,
     available_pinn_schedule_names,
     build_pinn_schedule_fn,
-    choose_pinn_schedule_via_warmup,
 )
 from adscheduler.workloads import (
     available_derivative_workload_names,
@@ -46,6 +51,7 @@ class WorkloadBenchmarkResult:
     workload_name: str
     description: str
     selected_schedule_name: str | None
+    compiler_score_summary: str | None
     selection_overhead_sec: float
     compile_overhead_sec: float
     avg_runtime_sec: float
@@ -88,36 +94,39 @@ def parse_args() -> argparse.Namespace:
         "--auto-warmup-steps",
         type=int,
         default=3,
-        help="Number of warmup executions used by mlp_laplacian_auto selection.",
+        help=(
+            "Retained for compatibility. Workload auto selection is compiler-pass "
+            "informed and does not run timing warmups."
+        ),
     )
     parser.add_argument(
         "--auto-memory-budget-mb",
         type=float,
         default=None,
-        help="Optional memory budget used by mlp_laplacian_auto selection.",
+        help="Retained for compatibility with schedule benchmarks.",
     )
     parser.add_argument(
         "--auto-warmup-error-tolerance",
         type=float,
         default=0.10,
-        help="Relative numerical-error tolerance used by mlp_laplacian_auto selection.",
+        help="Retained for compatibility with schedule benchmarks.",
     )
     parser.add_argument(
         "--auto-max-params-for-forward-like",
         type=int,
         default=50000,
-        help="Skip for/for_remat during auto selection if parameter count exceeds this.",
+        help="Retained for compatibility with schedule benchmarks.",
     )
     parser.add_argument(
         "--auto-cache-path",
         type=str,
         default=".adscheduler_laplacian_warmup_cache.json",
-        help="Warmup selection cache path used by mlp_laplacian_auto.",
+        help="Retained for compatibility with schedule benchmarks.",
     )
     parser.add_argument(
         "--disable-auto-cache",
         action="store_true",
-        help="Disable warmup cache for mlp_laplacian_auto.",
+        help="Retained for compatibility with schedule benchmarks.",
     )
     parser.add_argument(
         "--json",
@@ -168,6 +177,8 @@ def main() -> None:
     for result in results:
         print(f"[{result.workload_name}]")
         print(f"  description: {result.description}")
+        if result.compiler_score_summary is not None:
+            print(f"  compiler_score: {result.compiler_score_summary}")
         if result.selected_schedule_name is not None:
             print(f"  selected_schedule: {result.selected_schedule_name}")
             print(f"  selection_overhead_ms: {result.selection_overhead_sec * 1e3:.3f}")
@@ -224,6 +235,7 @@ def benchmark_workload(
         workload_name=workload.name,
         description=workload.description,
         selected_schedule_name=None,
+        compiler_score_summary=_compiler_score_summary_for_workload(workload_name, seed=seed),
         selection_overhead_sec=0.0,
         fn=workload.derivative_task,
         args=workload.args,
@@ -247,39 +259,31 @@ def benchmark_auto_mlp_laplacian(
     workload = make_derivative_workload("mlp_laplacian_hessian", seed=seed)
     params, points = workload.args
     points_arr = np.asarray(points)
+    hidden_dim = int(np.asarray(params[0][1]).shape[0])
     config = LaplacianBenchmarkConfig(
         seed=seed,
         outer_steps=runs,
         eval_every=max(1, runs),
         num_points=int(points_arr.shape[0]),
         input_dim=int(points_arr.shape[1]),
+        hidden_dim=hidden_dim,
+        hidden_layers=len(params) - 1,
     )
-
-    selection_start = time.perf_counter()
-    selected_schedule, selection = choose_laplacian_schedule_via_warmup(
-        config,
-        params=params,
-        candidate_schedules=available_laplacian_schedule_names(),
-        warmup_steps=auto_warmup_steps,
-        memory_budget_mb=auto_memory_budget_mb,
-        error_guard_tolerance=auto_warmup_error_tolerance,
-        max_params_for_forward_like=auto_max_params_for_forward_like,
-        use_cache=use_auto_cache,
-        cache_path=auto_cache_path,
+    selected_schedule, selected_score, scored_candidates, selection_overhead_sec = (
+        _select_laplacian_schedule_by_stablehlo(config)
     )
-    selection_overhead_sec = time.perf_counter() - selection_start
-
     schedule_fn = build_laplacian_schedule_fn(selected_schedule)
-    description = (
-        "Input-space Laplacian of a 64-layer JAX MLP with hidden size 128 via warmup-selected "
-        f"schedule '{selected_schedule}' over ror/for/jacrev/jacfwd/remat candidates."
+    description = _compiler_auto_description(
+        candidate_kind="Laplacian schedules",
+        selected_name=selected_schedule,
+        selected_score=selected_score,
+        scored_candidates=scored_candidates,
     )
-    if selection.from_cache:
-        description += " Selection came from cache."
     return _benchmark_callable(
         workload_name=AUTO_MLP_LAPLACIAN_WORKLOAD,
         description=description,
         selected_schedule_name=selected_schedule,
+        compiler_score_summary=_compiler_score_summary(selected_score),
         selection_overhead_sec=selection_overhead_sec,
         fn=schedule_fn,
         args=(params, points),
@@ -297,48 +301,100 @@ def benchmark_auto_poisson_pinn(
 ) -> WorkloadBenchmarkResult:
     workload = make_derivative_workload("poisson_pinn_hessian", seed=seed)
     params, points = workload.args
-    selection_start = time.perf_counter()
-    selected_schedule, selection = choose_pinn_schedule_via_warmup(
-        PINNBenchmarkConfig(
-            seed=seed,
-            outer_steps=runs,
-            eval_every=max(1, runs),
-            grid_size=int(round(np.sqrt(np.asarray(points).shape[0]))),
-            input_dim=int(np.asarray(params[0][0]).shape[0]),
-            hidden_layers=len(params) - 1,
-            hidden_dim=int(np.asarray(params[0][1]).shape[0]),
-            activation="tanh",
-            output_dim=int(np.asarray(params[-1][1]).shape[0]),
-        ),
-        params=params,
-        points=points,
-        candidate_schedules=available_pinn_schedule_names(),
-        warmup_steps=auto_warmup_steps,
-        memory_budget_mb=None,
-        use_cache=False,
+    config = PINNBenchmarkConfig(
+        seed=seed,
+        outer_steps=runs,
+        eval_every=max(1, runs),
+        grid_size=int(round(np.sqrt(np.asarray(points).shape[0]))),
+        input_dim=int(np.asarray(params[0][0]).shape[0]),
+        hidden_layers=len(params) - 1,
+        hidden_dim=int(np.asarray(params[0][1]).shape[0]),
+        activation="tanh",
+        output_dim=int(np.asarray(params[-1][1]).shape[0]),
     )
-    selection_overhead_sec = time.perf_counter() - selection_start
-    selected_fn = build_pinn_schedule_fn(selected_schedule)
-    selected_profile = next(
-        profile
-        for profile in selection.profiles
-        if profile.schedule_name == selected_schedule
+    selected_schedule, selected_score, scored_candidates, selection_overhead_sec = (
+        _select_pinn_schedule_by_stablehlo(config)
     )
-    description = (
-        "Training loss and parameter gradient for a Poisson PINN via "
-        f"warmup-selected strategy '{selected_schedule}'. "
-        f"selection_score={selected_profile.score:.6f} "
-        f"max_reference_error={selected_profile.final_max_abs_error:.6e}."
+    schedule_fn = build_pinn_schedule_fn(selected_schedule)
+    description = _compiler_auto_description(
+        candidate_kind="PINN schedules",
+        selected_name=selected_schedule,
+        selected_score=selected_score,
+        scored_candidates=scored_candidates,
     )
     return _benchmark_callable(
         workload_name=AUTO_POISSON_PINN_WORKLOAD,
         description=description,
         selected_schedule_name=selected_schedule,
+        compiler_score_summary=_compiler_score_summary(selected_score),
         selection_overhead_sec=selection_overhead_sec,
-        fn=selected_fn,
+        fn=schedule_fn,
         args=(params, points),
         warmup_runs=warmup_runs,
         runs=runs,
+    )
+
+
+def _select_laplacian_schedule_by_stablehlo(config: LaplacianBenchmarkConfig):
+    selection_start = time.perf_counter()
+    scored_candidates = []
+    for schedule_name in available_laplacian_schedule_names():
+        program = lower_laplacian_schedule_to_stablehlo(schedule_name, config=config)
+        pipeline_result = run_stablehlo_pass_pipeline(program)
+        compiler_score = score_stablehlo_optimization_surface(pipeline_result)
+        scored_candidates.append((schedule_name, compiler_score))
+    selected_name, selected_score = min(scored_candidates, key=lambda item: item[1].score)
+    return selected_name, selected_score, scored_candidates, time.perf_counter() - selection_start
+
+
+def _select_pinn_schedule_by_stablehlo(config: PINNBenchmarkConfig):
+    selection_start = time.perf_counter()
+    scored_candidates = []
+    for schedule_name in available_pinn_schedule_names():
+        program = lower_pinn_schedule_to_stablehlo(schedule_name, config=config)
+        pipeline_result = run_stablehlo_pass_pipeline(program)
+        compiler_score = score_stablehlo_optimization_surface(pipeline_result)
+        scored_candidates.append((schedule_name, compiler_score))
+    selected_name, selected_score = min(scored_candidates, key=lambda item: item[1].score)
+    return selected_name, selected_score, scored_candidates, time.perf_counter() - selection_start
+
+
+def _compiler_auto_description(
+    *,
+    candidate_kind: str,
+    selected_name: str,
+    selected_score,
+    scored_candidates,
+) -> str:
+    score_summary = "; ".join(
+        f"{name}:score={score.score:.3f},ops={score.total_operations},"
+        f"dups={score.duplicated_operations},fusion_regions={score.fusion_regions}"
+        for name, score in scored_candidates
+    )
+    return (
+        "Compiler-pass-informed selection over "
+        f"{candidate_kind}. "
+        f"selected={selected_name} compiler_score={selected_score.score:.3f} "
+        f"estimated_optimized_ops={selected_score.estimated_optimized_operations:.3f}. "
+        f"candidate_scores=[{score_summary}]"
+    )
+
+
+def _compiler_score_summary_for_workload(workload_name: str, *, seed: int) -> str:
+    program = lower_workload_to_stablehlo(workload_name, seed=seed)
+    pipeline_result = run_stablehlo_pass_pipeline(program)
+    compiler_score = score_stablehlo_optimization_surface(pipeline_result)
+    return _compiler_score_summary(compiler_score)
+
+
+def _compiler_score_summary(score) -> str:
+    return (
+        f"score={score.score:.3f} "
+        f"estimated_optimized_ops={score.estimated_optimized_operations:.3f} "
+        f"ops={score.total_operations} "
+        f"dups={score.duplicated_operations} "
+        f"fusion_regions={score.fusion_regions} "
+        f"expensive_ops={score.expensive_operations}"
     )
 
 
@@ -347,6 +403,7 @@ def _benchmark_callable(
     workload_name: str,
     description: str,
     selected_schedule_name: str | None,
+    compiler_score_summary: str | None,
     selection_overhead_sec: float,
     fn,
     args: tuple,
@@ -380,6 +437,7 @@ def _benchmark_callable(
         workload_name=workload_name,
         description=description,
         selected_schedule_name=selected_schedule_name,
+        compiler_score_summary=compiler_score_summary,
         selection_overhead_sec=selection_overhead_sec,
         compile_overhead_sec=compile_overhead_sec,
         avg_runtime_sec=float(np.mean(timings_arr)),

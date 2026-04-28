@@ -55,6 +55,12 @@ python3 scripts/run_workload_benchmark.py \
   --runs 100
 ```
 
+`mlp_laplacian_auto` lowers the Laplacian schedule family
+(`ror`, `for`, `jacrev`, `jacfwd`, and remat variants) to StableHLO, runs the
+compiler analysis passes, then benchmarks the schedule with the best
+compiler-surface score. The explicit `hessian`, `jvp_grad`, and `jet` workloads
+also report StableHLO compiler scores, but they are not the auto candidates.
+
 Benchmark Poisson PINN derivative strategies:
 
 ```bash
@@ -66,6 +72,11 @@ python3 scripts/run_workload_benchmark.py \
   --warmup-runs 5 \
   --runs 100
 ```
+
+`poisson_pinn_auto` uses the same compiler-pass-informed selection over the PINN
+schedule family (`ror`, `for`, `jacrev`, `jacfwd`, and remat variants). The
+explicit `hessian`, `jvp_grad`, and `jet` PINN workloads also report StableHLO
+compiler scores separately.
 
 Run fixed Laplacian schedule benchmarks:
 
@@ -115,6 +126,41 @@ python3 scripts/run_pinn_schedule_benchmark.py \
   --memory-budget-mb 4096
 ```
 
+## StableHLO Passes
+
+Lower schedules or workloads to StableHLO and run the first compiler-aware
+analysis passes:
+
+```bash
+python3 scripts/run_stablehlo_passes.py \
+  --workload laplacian_hessian \
+  --workload laplacian_jvp_grad \
+  --workload laplacian_jet
+```
+
+```bash
+python3 scripts/run_stablehlo_passes.py \
+  --laplacian-schedule ror \
+  --laplacian-schedule for \
+  --laplacian-schedule jacrev \
+  --laplacian-schedule jacfwd
+```
+
+```bash
+python3 scripts/run_stablehlo_passes.py \
+  --pinn-schedule ror \
+  --pinn-schedule for \
+  --pinn-schedule jacrev \
+  --pinn-schedule jacfwd
+```
+
+The current StableHLO passes are conservative analysis passes:
+
+- `duplicate_operations`: repeated canonical operation signatures, as CSE candidates.
+- `dead_results`: SSA values with no apparent textual uses.
+- `elementwise_fusion_regions`: contiguous elementwise op runs that may be fusible.
+- `expensive_operations`: counts ops likely to dominate runtime or block fusion.
+
 ## What the Benchmarks Report
 
 The workload benchmark reports JIT compile overhead and timed steady-state
@@ -145,8 +191,10 @@ model or learned policy.
 - `src/adscheduler/workloads.py`: MLP Laplacian, Poisson PINN, and general workload tracing helpers.
 - `src/adscheduler/laplacian_benchmark.py`: fixed and auto schedule evaluation for MLP Laplacians.
 - `src/adscheduler/pinn_benchmark.py`: fixed and auto schedule evaluation for Poisson PINNs.
+- `src/adscheduler/stablehlo_passes.py`: StableHLO lowering and compiler-aware analysis passes.
 - `src/adscheduler/ir_analysis.py`: recursive `jaxpr` feature extraction.
 - `scripts/run_trace_analysis.py`: CLI for tracing derivative workloads and IR reports.
+- `scripts/run_stablehlo_passes.py`: CLI for lowering to StableHLO and running analysis passes.
 - `scripts/run_laplacian_schedule_benchmark.py`: CLI for Laplacian schedule benchmarks.
 - `scripts/run_pinn_schedule_benchmark.py`: CLI for PINN schedule benchmarks.
 - `scripts/run_workload_benchmark.py`: CLI for benchmarking derivative workload runtimes.
