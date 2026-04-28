@@ -73,6 +73,8 @@ Run fixed Laplacian schedule benchmarks:
 python3 scripts/run_laplacian_schedule_benchmark.py \
   --schedule ror --schedule for --schedule jacrev --schedule jacfwd \
   --schedule ror_remat --schedule for_remat --schedule jacrev_remat --schedule jacfwd_remat \
+  --hidden-layers 64 \
+  --hidden-dim 128 \
   --outer-steps 100 \
   --eval-every 10
 ```

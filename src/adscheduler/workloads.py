@@ -315,7 +315,7 @@ def _make_mlp_laplacian_strategy_workload(
     return DerivativeWorkload(
         name=name,
         description=(
-            "Input-space Laplacian of a 16-layer JAX MLP via "
+            "Input-space Laplacian of a 64-layer JAX MLP with hidden size 128 via "
             f"{_make_mlp_laplacian_strategy_description(strategy)}."
         ),
         derivative_task=derivative_task,

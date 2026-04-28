@@ -47,8 +47,8 @@ class LaplacianBenchmarkConfig:
     eval_every: int = 10
     num_points: int = 32
     input_dim: int = 3
-    hidden_dim: int = 16
-    hidden_layers: int = 3
+    hidden_dim: int = 128
+    hidden_layers: int = 64
     target_max_abs_error: float = 1e-4
 
 

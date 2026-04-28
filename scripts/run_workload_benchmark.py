@@ -271,7 +271,7 @@ def benchmark_auto_mlp_laplacian(
 
     schedule_fn = build_laplacian_schedule_fn(selected_schedule)
     description = (
-        "Input-space Laplacian of a 16-layer JAX MLP via warmup-selected "
+        "Input-space Laplacian of a 64-layer JAX MLP with hidden size 128 via warmup-selected "
         f"schedule '{selected_schedule}' over ror/for/jacrev/jacfwd/remat candidates."
     )
     if selection.from_cache:

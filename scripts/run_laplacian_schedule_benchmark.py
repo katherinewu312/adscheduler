@@ -32,8 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--num-points", type=int, default=32)
     parser.add_argument("--input-dim", type=int, default=3)
-    parser.add_argument("--hidden-dim", type=int, default=16)
-    parser.add_argument("--hidden-layers", type=int, default=3)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--hidden-layers", type=int, default=64)
     parser.add_argument("--target-error", type=float, default=1e-4)
 
     parser.add_argument(
