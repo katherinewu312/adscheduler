@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+.adscheduler_warmup_cache.json
+.adscheduler_*_warmup_cache.json

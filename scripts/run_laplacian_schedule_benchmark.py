@@ -11,43 +11,37 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from adscheduler.benchmark import (
-    BenchmarkConfig,
-    evaluation_report_to_dict,
-    run_evaluation_protocol,
+from adscheduler.laplacian_benchmark import (
+    LaplacianBenchmarkConfig,
+    available_laplacian_schedule_names,
+    laplacian_evaluation_report_to_dict,
+    normalize_laplacian_schedule_names,
+    run_laplacian_evaluation_protocol,
 )
-from adscheduler.maml import available_schedule_names, normalize_schedule_names
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run schedule benchmarking for MAML meta-learning with statistical, "
-            "hardware, and optional warmup-based auto selection metrics."
+            "Run schedule benchmarking for the MLP Laplacian derivative workload "
+            "with runtime, IR, numerical-error, and optional warmup auto-selection metrics."
         ),
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--outer-steps", type=int, default=500)
+    parser.add_argument("--outer-steps", type=int, default=100)
     parser.add_argument("--eval-every", type=int, default=10)
-    parser.add_argument("--meta-batch-size", type=int, default=4)
-    parser.add_argument("--meta-test-tasks", type=int, default=64)
-    parser.add_argument("--target-accuracy", type=float, default=0.85)
-
-    parser.add_argument("--in-dim", type=int, default=8)
-    parser.add_argument("--hidden-dim", type=int, default=32)
-    parser.add_argument("--out-dim", type=int, default=1)
-    parser.add_argument("--n-support", type=int, default=16)
-    parser.add_argument("--n-query", type=int, default=16)
-    parser.add_argument("--inner-steps", type=int, default=5)
-    parser.add_argument("--inner-lr", type=float, default=0.1)
-    parser.add_argument("--outer-lr", type=float, default=0.01)
+    parser.add_argument("--num-points", type=int, default=32)
+    parser.add_argument("--input-dim", type=int, default=3)
+    parser.add_argument("--hidden-dim", type=int, default=16)
+    parser.add_argument("--hidden-layers", type=int, default=3)
+    parser.add_argument("--target-error", type=float, default=1e-4)
 
     parser.add_argument(
         "--schedule",
         action="append",
-        choices=available_schedule_names(),
+        choices=available_laplacian_schedule_names(),
         dest="schedules",
-        help="Fixed schedule baseline to benchmark. Repeat for multiple.",
+        help="Fixed Laplacian schedule baseline to benchmark. Repeat for multiple.",
     )
 
     parser.add_argument(
@@ -58,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--auto-candidate",
         action="append",
-        choices=available_schedule_names(),
+        choices=available_laplacian_schedule_names(),
         dest="auto_candidates",
         help="Candidate schedule considered by auto tuner. Repeat for multiple.",
     )
@@ -66,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         "--warmup-steps",
         type=int,
         default=3,
-        help="Number of warmup outer steps profiled per candidate schedule.",
+        help="Number of warmup executions profiled per candidate schedule.",
     )
     parser.add_argument(
         "--memory-budget-mb",
@@ -78,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         "--warmup-loss-tolerance",
         type=float,
         default=0.10,
-        help="Relative tolerance for warmup loss guard (e.g., 0.1 = 10%%).",
+        help="Relative tolerance for the warmup numerical-error guard.",
     )
     parser.add_argument(
         "--max-params-for-forward-like",
@@ -94,10 +88,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--warmup-cache-path",
         type=str,
-        default=".adscheduler_warmup_cache.json",
+        default=".adscheduler_laplacian_warmup_cache.json",
         help="Path to warmup selection cache file.",
     )
-
     parser.add_argument(
         "--json",
         action="store_true",
@@ -108,53 +101,52 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    selected_baselines = normalize_schedule_names(args.schedules)
+    selected_baselines = normalize_laplacian_schedule_names(args.schedules)
     selected_auto_candidates = (
-        normalize_schedule_names(args.auto_candidates)
+        normalize_laplacian_schedule_names(args.auto_candidates)
         if args.auto_candidates
         else selected_baselines
     )
 
-    config = BenchmarkConfig(
+    config = LaplacianBenchmarkConfig(
         seed=args.seed,
         outer_steps=args.outer_steps,
         eval_every=args.eval_every,
-        meta_batch_size=args.meta_batch_size,
-        meta_test_tasks=args.meta_test_tasks,
-        target_meta_test_accuracy=args.target_accuracy,
-        in_dim=args.in_dim,
+        num_points=args.num_points,
+        input_dim=args.input_dim,
         hidden_dim=args.hidden_dim,
-        out_dim=args.out_dim,
-        n_support=args.n_support,
-        n_query=args.n_query,
-        inner_steps=args.inner_steps,
-        inner_lr=args.inner_lr,
-        outer_lr=args.outer_lr,
+        hidden_layers=args.hidden_layers,
+        target_max_abs_error=args.target_error,
     )
 
-    report = run_evaluation_protocol(
+    report = run_laplacian_evaluation_protocol(
         config,
         baseline_schedules=selected_baselines,
         include_auto=args.include_auto,
         auto_candidate_schedules=selected_auto_candidates,
         warmup_steps=args.warmup_steps,
         memory_budget_mb=args.memory_budget_mb,
-        loss_guard_tolerance=args.warmup_loss_tolerance,
+        error_guard_tolerance=args.warmup_loss_tolerance,
         max_params_for_forward_like=args.max_params_for_forward_like,
         use_cache=not args.disable_warmup_cache,
         cache_path=args.warmup_cache_path,
     )
 
-    print("=== Benchmark Summary ===")
+    print("=== Laplacian Benchmark Summary ===")
     print(f"fixed_schedules: {', '.join(selected_baselines)}")
     print(f"outer_steps: {args.outer_steps} eval_every: {args.eval_every}")
-    print(f"target_meta_test_accuracy: {args.target_accuracy}")
+    print(
+        "workload: "
+        f"num_points={args.num_points} input_dim={args.input_dim} "
+        f"hidden_dim={args.hidden_dim} hidden_layers={args.hidden_layers}"
+    )
+    print(f"target_max_abs_error: {args.target_error}")
     if args.include_auto:
         print(f"auto_candidates: {', '.join(selected_auto_candidates)}")
         print(
             "warmup: "
             f"steps={args.warmup_steps} "
-            f"loss_tolerance={args.warmup_loss_tolerance} "
+            f"error_tolerance={args.warmup_loss_tolerance} "
             f"cache={'off' if args.disable_warmup_cache else args.warmup_cache_path}"
         )
     print()
@@ -162,8 +154,8 @@ def main() -> None:
     print("=== Fixed Schedule Results ===")
     for result in report.fixed_results:
         iters_to_target = (
-            str(result.outer_iterations_to_target)
-            if result.outer_iterations_to_target is not None
+            str(result.iterations_to_target_error)
+            if result.iterations_to_target_error is not None
             else "not reached"
         )
         peak_device = (
@@ -171,15 +163,16 @@ def main() -> None:
             if result.peak_device_memory_mb is not None
             else "n/a"
         )
-
         print(f"[{result.schedule_name}]")
-        print(f"  final_meta_test_accuracy: {result.final_meta_test_accuracy:.4f}")
-        print(f"  best_meta_test_accuracy: {result.best_meta_test_accuracy:.4f}")
-        print(f"  outer_iterations_to_target: {iters_to_target}")
-        print(f"  final_meta_train_loss: {result.final_meta_train_loss:.6f}")
-        print(f"  avg_outer_step_time_ms: {result.avg_outer_step_time_sec * 1e3:.3f}")
-        print(f"  p50_outer_step_time_ms: {result.p50_outer_step_time_sec * 1e3:.3f}")
-        print(f"  p90_outer_step_time_ms: {result.p90_outer_step_time_sec * 1e3:.3f}")
+        print(f"  final_max_abs_error: {result.final_max_abs_error:.6e}")
+        print(f"  best_max_abs_error: {result.best_max_abs_error:.6e}")
+        print(f"  iterations_to_target_error: {iters_to_target}")
+        print(f"  output_mean: {result.output_mean:.6f}")
+        print(f"  output_min: {result.output_min:.6f}")
+        print(f"  output_max: {result.output_max:.6f}")
+        print(f"  avg_step_time_ms: {result.avg_step_time_sec * 1e3:.3f}")
+        print(f"  p50_step_time_ms: {result.p50_step_time_sec * 1e3:.3f}")
+        print(f"  p90_step_time_ms: {result.p90_step_time_sec * 1e3:.3f}")
         print(f"  compile_overhead_ms: {result.compile_overhead_sec * 1e3:.3f}")
         print(f"  peak_host_memory_mb: {result.peak_host_memory_mb:.2f}")
         print(f"  peak_device_memory_mb: {peak_device}")
@@ -192,8 +185,8 @@ def main() -> None:
         auto = report.auto_result
         warmup = report.warmup_selection
         iters_to_target = (
-            str(auto.outer_iterations_to_target)
-            if auto.outer_iterations_to_target is not None
+            str(auto.iterations_to_target_error)
+            if auto.iterations_to_target_error is not None
             else "not reached"
         )
         peak_device = (
@@ -201,18 +194,16 @@ def main() -> None:
             if auto.peak_device_memory_mb is not None
             else "n/a"
         )
-
         print("=== Auto Selection Result ===")
         print(f"  selected_schedule: {auto.selected_schedule_name}")
         print(f"  used_warmup_cache: {auto.used_warmup_cache}")
         print(f"  warmup_overhead_ms: {auto.warmup_overhead_sec * 1e3:.3f}")
-        print(f"  final_meta_test_accuracy: {auto.final_meta_test_accuracy:.4f}")
-        print(f"  best_meta_test_accuracy: {auto.best_meta_test_accuracy:.4f}")
-        print(f"  outer_iterations_to_target: {iters_to_target}")
-        print(f"  final_meta_train_loss: {auto.final_meta_train_loss:.6f}")
-        print(f"  avg_outer_step_time_ms: {auto.avg_outer_step_time_sec * 1e3:.3f}")
-        print(f"  p50_outer_step_time_ms: {auto.p50_outer_step_time_sec * 1e3:.3f}")
-        print(f"  p90_outer_step_time_ms: {auto.p90_outer_step_time_sec * 1e3:.3f}")
+        print(f"  final_max_abs_error: {auto.final_max_abs_error:.6e}")
+        print(f"  best_max_abs_error: {auto.best_max_abs_error:.6e}")
+        print(f"  iterations_to_target_error: {iters_to_target}")
+        print(f"  avg_step_time_ms: {auto.avg_step_time_sec * 1e3:.3f}")
+        print(f"  p50_step_time_ms: {auto.p50_step_time_sec * 1e3:.3f}")
+        print(f"  p90_step_time_ms: {auto.p90_step_time_sec * 1e3:.3f}")
         print(f"  compile_overhead_ms: {auto.compile_overhead_sec * 1e3:.3f}")
         print(f"  peak_host_memory_mb: {auto.peak_host_memory_mb:.2f}")
         print(f"  peak_device_memory_mb: {peak_device}")
@@ -235,7 +226,7 @@ def main() -> None:
                         f"median_ms={profile.median_step_time_sec * 1e3:.3f} "
                         f"p90_ms={profile.p90_step_time_sec * 1e3:.3f} "
                         f"peak_mem_mb={peak_mem:.2f} "
-                        f"final_loss={profile.final_meta_loss:.6f} "
+                        f"final_error={profile.final_max_abs_error:.6e} "
                         f"status={status}"
                     )
             print()
@@ -252,8 +243,8 @@ def main() -> None:
         print()
 
     if args.json:
-        print("=== Benchmark JSON ===")
-        print(json.dumps(evaluation_report_to_dict(report), indent=2))
+        print("=== Laplacian Benchmark JSON ===")
+        print(json.dumps(laplacian_evaluation_report_to_dict(report), indent=2))
 
 
 if __name__ == "__main__":

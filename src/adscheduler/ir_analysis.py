@@ -134,19 +134,19 @@ def analyze_closed_jaxpr(
 
 
 def compute_feature_delta(
-    full_maml: JaxprFeatures,
-    first_order_maml: JaxprFeatures,
+    lhs: JaxprFeatures,
+    rhs: JaxprFeatures,
 ) -> FeatureDelta:
     primitive_delta: dict[str, int] = {}
 
-    keys = set(full_maml.primitive_histogram) | set(first_order_maml.primitive_histogram)
+    keys = set(lhs.primitive_histogram) | set(rhs.primitive_histogram)
     for primitive in sorted(keys):
-        diff = full_maml.primitive_histogram.get(primitive, 0) - first_order_maml.primitive_histogram.get(primitive, 0)
+        diff = lhs.primitive_histogram.get(primitive, 0) - rhs.primitive_histogram.get(primitive, 0)
         if diff:
             primitive_delta[primitive] = diff
 
     return FeatureDelta(
-        total_equations_delta=full_maml.total_equations - first_order_maml.total_equations,
+        total_equations_delta=lhs.total_equations - rhs.total_equations,
         primitive_histogram_delta=primitive_delta,
     )
 
