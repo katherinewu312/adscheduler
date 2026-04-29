@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/adscheduler/__init__.py
+src/adscheduler/ir_analysis.py
+src/adscheduler/iree_benchmark_worker.py
+src/adscheduler/laplacian_benchmark.py
+src/adscheduler/pinn_benchmark.py
+src/adscheduler/stablehlo_execution.py
+src/adscheduler/stablehlo_passes.py
+src/adscheduler/workloads.py
+src/adscheduler_template.egg-info/PKG-INFO
+src/adscheduler_template.egg-info/SOURCES.txt
+src/adscheduler_template.egg-info/dependency_links.txt
+src/adscheduler_template.egg-info/requires.txt
+src/adscheduler_template.egg-info/top_level.txt

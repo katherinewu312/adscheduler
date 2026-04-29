@@ -85,6 +85,14 @@ class StableHLOPipelineResult:
 
 
 @dataclass(frozen=True)
+class StableHLOTransformResult:
+    original_program: StableHLOProgram
+    transformed_program: StableHLOProgram
+    analysis: StableHLOPipelineResult
+    transform_results: list[StableHLOPassResult]
+
+
+@dataclass(frozen=True)
 class StableHLOCompilerScore:
     program_name: str
     score: float
@@ -173,6 +181,47 @@ def run_stablehlo_pass_pipeline(
 
 def available_stablehlo_pass_names() -> tuple[str, ...]:
     return tuple(_PASS_REGISTRY)
+
+
+def run_stablehlo_transform_pipeline(
+    program: StableHLOProgram,
+    *,
+    passes: Sequence[str] | None = None,
+) -> StableHLOTransformResult:
+    """Run source-level StableHLO optimization passes.
+
+    The analysis pipeline is intentionally preserved for scoring. This function
+    additionally rewrites the StableHLO module with conservative SSA transforms
+    that keep the module in StableHLO text form so another backend can compile
+    it. The executable transforms implemented here are CSE-style duplicate
+    operation elimination and iterative dead-result elimination. Region-level
+    fusion is left to XLA because StableHLO does not expose a portable generic
+    fusion op in the text dialect emitted by JAX.
+    """
+
+    selected_passes = tuple(passes or available_stablehlo_pass_names())
+    analysis = run_stablehlo_pass_pipeline(program, passes=selected_passes)
+    stablehlo_text = program.stablehlo_text
+    transform_results: list[StableHLOPassResult] = []
+
+    if "duplicate_operations" in selected_passes:
+        stablehlo_text, pass_result = _eliminate_duplicate_operations(stablehlo_text)
+        transform_results.append(pass_result)
+
+    if "dead_results" in selected_passes:
+        stablehlo_text, pass_result = _eliminate_dead_results(stablehlo_text)
+        transform_results.append(pass_result)
+
+    transformed_program = StableHLOProgram(
+        name=f"{program.name}_stablehlo_passes",
+        stablehlo_text=stablehlo_text,
+    )
+    return StableHLOTransformResult(
+        original_program=program,
+        transformed_program=transformed_program,
+        analysis=analysis,
+        transform_results=transform_results,
+    )
 
 
 def stablehlo_operation_histogram(stablehlo_text: str) -> dict[str, int]:
@@ -378,6 +427,156 @@ def _canonical_operation_signature(line: str) -> str:
     signature = re.sub(r"%[\w.:\-#]+", "%v", signature)
     signature = re.sub(r"\s+", " ", signature)
     return signature
+
+
+def _eliminate_duplicate_operations(stablehlo_text: str) -> tuple[str, StableHLOPassResult]:
+    canonical_values: dict[str, str] = {}
+    replacements: dict[str, str] = {}
+    removed_details: list[str] = []
+    new_lines: list[str] = []
+    region_mask = _nested_region_line_mask(stablehlo_text.splitlines())
+
+    for line, in_nested_region in zip(stablehlo_text.splitlines(), region_mask, strict=True):
+        if line.strip().startswith("func.func"):
+            canonical_values = {}
+            replacements = {}
+            new_lines.append(line)
+            continue
+        rewritten_line = _replace_ssa_values(line, replacements)
+        if in_nested_region:
+            new_lines.append(rewritten_line)
+            continue
+        if not STABLEHLO_OP_RE.search(rewritten_line):
+            new_lines.append(rewritten_line)
+            continue
+
+        result_name = _single_result_name(rewritten_line)
+        if result_name is None or not _is_cse_safe_operation(rewritten_line):
+            new_lines.append(rewritten_line)
+            continue
+
+        signature = _cse_operation_signature(rewritten_line)
+        canonical_result = canonical_values.get(signature)
+        if canonical_result is None:
+            canonical_values[signature] = result_name
+            new_lines.append(rewritten_line)
+            continue
+
+        replacements[result_name] = canonical_result
+        removed_details.append(f"{result_name} -> {canonical_result}: {signature[:160]}")
+
+    return "\n".join(new_lines), StableHLOPassResult(
+        pass_name="duplicate_operations_transform",
+        summary="Eliminates repeated single-result StableHLO operations and rewrites later uses.",
+        metrics={
+            "removed_operations": len(removed_details),
+            "replacement_values": len(replacements),
+        },
+        details=removed_details[:20],
+    )
+
+
+def _eliminate_dead_results(stablehlo_text: str) -> tuple[str, StableHLOPassResult]:
+    lines = stablehlo_text.splitlines()
+    removed_details: list[str] = []
+    total_removed = 0
+
+    while True:
+        use_counts = _ssa_use_counts(lines)
+        region_mask = _nested_region_line_mask(lines)
+        next_lines: list[str] = []
+        removed_this_round = 0
+        for line, in_nested_region in zip(lines, region_mask, strict=True):
+            result_name = _single_result_name(line)
+            if (
+                not in_nested_region
+                and result_name is not None
+                and STABLEHLO_OP_RE.search(line)
+                and _is_dce_safe_operation(line)
+                and use_counts.get(result_name, 0) == 0
+            ):
+                removed_this_round += 1
+                removed_details.append(f"removed {result_name}: {line.strip()[:160]}")
+                continue
+            next_lines.append(line)
+
+        lines = next_lines
+        total_removed += removed_this_round
+        if removed_this_round == 0:
+            break
+
+    return "\n".join(lines), StableHLOPassResult(
+        pass_name="dead_results_transform",
+        summary="Iteratively removes unused single-result StableHLO operations.",
+        metrics={"removed_operations": total_removed},
+        details=removed_details[:20],
+    )
+
+
+def _replace_ssa_values(line: str, replacements: dict[str, str]) -> str:
+    if not replacements:
+        return line
+
+    def replace(match: re.Match[str]) -> str:
+        value = match.group(0)
+        return replacements.get(value, value)
+
+    return SSA_VALUE_RE.sub(replace, line)
+
+
+def _nested_region_line_mask(lines: Sequence[str]) -> list[bool]:
+    mask: list[bool] = []
+    in_nested_region = False
+    for line in lines:
+        stripped = line.strip()
+        mask.append(in_nested_region)
+        if stripped.startswith("^bb"):
+            in_nested_region = True
+        elif in_nested_region and stripped == "}":
+            in_nested_region = False
+    return mask
+
+
+def _cse_operation_signature(line: str) -> str:
+    signature = LOCATION_RE.sub("", line.strip())
+    signature = RESULT_PREFIX_RE.sub("", signature)
+    signature = re.sub(r"\s+", " ", signature)
+    return signature
+
+
+def _single_result_name(line: str) -> str | None:
+    if "=" not in line:
+        return None
+    lhs = line.split("=", 1)[0]
+    values = SSA_VALUE_RE.findall(lhs)
+    if len(values) != 1:
+        return None
+    return values[0]
+
+
+def _ssa_use_counts(lines: Sequence[str]) -> dict[str, int]:
+    use_counts: dict[str, int] = {}
+    for line in lines:
+        if "=" in line:
+            lhs, rhs = line.split("=", 1)
+            defined_values = set(SSA_VALUE_RE.findall(lhs))
+            used_values = [value for value in SSA_VALUE_RE.findall(rhs) if value not in defined_values]
+        else:
+            used_values = SSA_VALUE_RE.findall(line)
+        for value in used_values:
+            use_counts[value] = use_counts.get(value, 0) + 1
+    return use_counts
+
+
+def _is_cse_safe_operation(line: str) -> bool:
+    return _is_dce_safe_operation(line)
+
+
+def _is_dce_safe_operation(line: str) -> bool:
+    op_name = _operation_name(line)
+    if op_name == "stablehlo.custom_call":
+        return "has_side_effect = true" not in line
+    return op_name.startswith("stablehlo.")
 
 
 def _make_laplacian_lowering_args(config: LaplacianBenchmarkConfig):

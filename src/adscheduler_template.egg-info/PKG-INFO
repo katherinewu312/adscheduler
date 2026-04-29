@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: adscheduler-template
+Version: 0.1.0
+Summary: Prototype for tracing JAX derivative workloads to jaxpr and extracting IR features
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: jax>=0.4.30
+Requires-Dist: jaxlib>=0.4.30
+Requires-Dist: numpy>=1.26
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+
 # adscheduler
 
 `adscheduler` is a small JAX prototype for studying AD schedule selection and
@@ -201,4 +214,5 @@ model or learned policy.
 
 ## Notes
 
-Got rid of argument flattening, NumPy conversion, device transfer, and output normalization on every run (hence lowering the runtimes for the after compiler passes.)
+- The MLP Laplacian and Poisson PINN workloads are synthetic. They are meant to exercise higher-order derivative tracing before adding larger real kernels.
+- Forward-over-reverse currently uses a dense tangent basis and is mainly for smaller models/prototyping.

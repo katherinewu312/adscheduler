@@ -20,11 +20,17 @@ import jax
 import jax.tree_util as jtu
 
 from adscheduler.stablehlo_passes import (
+    StableHLOProgram,
     lower_laplacian_schedule_to_stablehlo,
     lower_pinn_schedule_to_stablehlo,
     lower_workload_to_stablehlo,
     run_stablehlo_pass_pipeline,
+    run_stablehlo_transform_pipeline,
     score_stablehlo_optimization_surface,
+)
+from adscheduler.stablehlo_execution import (
+    StableHLOExecutionUnavailable,
+    compile_stablehlo_with_xla,
 )
 from adscheduler.laplacian_benchmark import (
     LaplacianBenchmarkConfig,
@@ -47,12 +53,7 @@ AUTO_POISSON_PINN_WORKLOAD = "poisson_pinn_auto"
 
 
 @dataclass(frozen=True)
-class WorkloadBenchmarkResult:
-    workload_name: str
-    description: str
-    selected_schedule_name: str | None
-    compiler_score_summary: str | None
-    selection_overhead_sec: float
+class RuntimeStats:
     compile_overhead_sec: float
     avg_runtime_sec: float
     p50_runtime_sec: float
@@ -60,6 +61,18 @@ class WorkloadBenchmarkResult:
     min_runtime_sec: float
     max_runtime_sec: float
     output_summary: str
+    unavailable_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkloadBenchmarkResult:
+    workload_name: str
+    description: str
+    selected_schedule_name: str | None
+    compiler_score_summary: str | None
+    selection_overhead_sec: float
+    before_compiler_pass: RuntimeStats
+    after_compiler_pass: RuntimeStats
 
 
 def parse_args() -> argparse.Namespace:
@@ -182,13 +195,17 @@ def main() -> None:
         if result.selected_schedule_name is not None:
             print(f"  selected_schedule: {result.selected_schedule_name}")
             print(f"  selection_overhead_ms: {result.selection_overhead_sec * 1e3:.3f}")
-        print(f"  compile_overhead_ms: {result.compile_overhead_sec * 1e3:.3f}")
-        print(f"  avg_runtime_ms: {result.avg_runtime_sec * 1e3:.3f}")
-        print(f"  p50_runtime_ms: {result.p50_runtime_sec * 1e3:.3f}")
-        print(f"  p90_runtime_ms: {result.p90_runtime_sec * 1e3:.3f}")
-        print(f"  min_runtime_ms: {result.min_runtime_sec * 1e3:.3f}")
-        print(f"  max_runtime_ms: {result.max_runtime_sec * 1e3:.3f}")
-        print(f"  output: {result.output_summary}")
+        print(f"  compile_overhead_ms: {result.before_compiler_pass.compile_overhead_sec * 1e3:.3f}")
+        _print_runtime_stats(
+            "before compiler pass",
+            result.before_compiler_pass,
+            include_compile_overhead=False,
+        )
+        _print_runtime_stats(
+            "after compiler pass",
+            result.after_compiler_pass,
+            include_compile_overhead=True,
+        )
         print()
 
     if args.json:
@@ -231,14 +248,18 @@ def benchmark_workload(
         )
 
     workload = make_derivative_workload(workload_name, seed=seed)
+    program = lower_workload_to_stablehlo(workload_name, seed=seed)
+    pipeline_result = run_stablehlo_pass_pipeline(program)
+    compiler_score = score_stablehlo_optimization_surface(pipeline_result)
     return _benchmark_callable(
         workload_name=workload.name,
         description=workload.description,
         selected_schedule_name=None,
-        compiler_score_summary=_compiler_score_summary_for_workload(workload_name, seed=seed),
+        compiler_score_summary=_compiler_score_summary(compiler_score),
         selection_overhead_sec=0.0,
         fn=workload.derivative_task,
         args=workload.args,
+        stablehlo_program=program,
         warmup_runs=warmup_runs,
         runs=runs,
     )
@@ -287,6 +308,10 @@ def benchmark_auto_mlp_laplacian(
         selection_overhead_sec=selection_overhead_sec,
         fn=schedule_fn,
         args=(params, points),
+        stablehlo_program=lower_laplacian_schedule_to_stablehlo(
+            selected_schedule,
+            config=config,
+        ),
         warmup_runs=warmup_runs,
         runs=runs,
     )
@@ -330,6 +355,10 @@ def benchmark_auto_poisson_pinn(
         selection_overhead_sec=selection_overhead_sec,
         fn=schedule_fn,
         args=(params, points),
+        stablehlo_program=lower_pinn_schedule_to_stablehlo(
+            selected_schedule,
+            config=config,
+        ),
         warmup_runs=warmup_runs,
         runs=runs,
     )
@@ -407,9 +436,41 @@ def _benchmark_callable(
     selection_overhead_sec: float,
     fn,
     args: tuple,
+    stablehlo_program: StableHLOProgram,
     warmup_runs: int,
     runs: int,
 ) -> WorkloadBenchmarkResult:
+    before_stats = _benchmark_jax_callable(
+        fn=fn,
+        args=args,
+        warmup_runs=warmup_runs,
+        runs=runs,
+    )
+    transform_result = run_stablehlo_transform_pipeline(stablehlo_program)
+    after_stats = _benchmark_transformed_stablehlo(
+        program=transform_result.transformed_program,
+        args=args,
+        warmup_runs=warmup_runs,
+        runs=runs,
+    )
+    return WorkloadBenchmarkResult(
+        workload_name=workload_name,
+        description=description,
+        selected_schedule_name=selected_schedule_name,
+        compiler_score_summary=compiler_score_summary,
+        selection_overhead_sec=selection_overhead_sec,
+        before_compiler_pass=before_stats,
+        after_compiler_pass=after_stats,
+    )
+
+
+def _benchmark_jax_callable(
+    *,
+    fn,
+    args: tuple,
+    warmup_runs: int,
+    runs: int,
+) -> RuntimeStats:
     jitted_task = jax.jit(fn)
 
     compile_start = time.perf_counter()
@@ -433,12 +494,7 @@ def _benchmark_callable(
         timings.append(time.perf_counter() - start)
 
     timings_arr = np.asarray(timings, dtype=np.float64)
-    return WorkloadBenchmarkResult(
-        workload_name=workload_name,
-        description=description,
-        selected_schedule_name=selected_schedule_name,
-        compiler_score_summary=compiler_score_summary,
-        selection_overhead_sec=selection_overhead_sec,
+    return RuntimeStats(
         compile_overhead_sec=compile_overhead_sec,
         avg_runtime_sec=float(np.mean(timings_arr)),
         p50_runtime_sec=float(np.percentile(timings_arr, 50)),
@@ -447,6 +503,94 @@ def _benchmark_callable(
         max_runtime_sec=float(np.max(timings_arr)),
         output_summary=_summarize_output(output),
     )
+
+
+def _benchmark_transformed_stablehlo(
+    *,
+    program: StableHLOProgram,
+    args: tuple,
+    warmup_runs: int,
+    runs: int,
+) -> RuntimeStats:
+    try:
+        executable = compile_stablehlo_with_xla(program)
+    except StableHLOExecutionUnavailable as exc:
+        return _unavailable_runtime_stats(str(exc))
+
+    try:
+        if executable.prepare_args is not None and executable.call_prepared is not None:
+            # Prepare arguments once outside the warmup and timed loops.
+            prepared_args = executable.prepare_args(*args)
+
+            def run_once():
+                return executable.call_prepared(prepared_args)
+        else:
+            # Fallback for older executables.
+            def run_once():
+                return executable.callable(*args)
+
+        output = run_once()
+        _block_tree(output)
+
+        for _ in range(warmup_runs):
+            output = run_once()
+            _block_tree(output)
+
+        timings = []
+        for _ in range(runs):
+            start = time.perf_counter()
+            output = run_once()
+            _block_tree(output)
+            timings.append(time.perf_counter() - start)
+
+    except Exception as exc:
+        return _unavailable_runtime_stats(
+            f"XLA/PJRT compiled transformed StableHLO but execution failed: {exc}"
+        )
+
+    timings_arr = np.asarray(timings, dtype=np.float64)
+    return RuntimeStats(
+        compile_overhead_sec=executable.compile_overhead_sec,
+        avg_runtime_sec=float(np.mean(timings_arr)),
+        p50_runtime_sec=float(np.percentile(timings_arr, 50)),
+        p90_runtime_sec=float(np.percentile(timings_arr, 90)),
+        min_runtime_sec=float(np.min(timings_arr)),
+        max_runtime_sec=float(np.max(timings_arr)),
+        output_summary=_summarize_output(output),
+    )
+
+
+def _unavailable_runtime_stats(reason: str) -> RuntimeStats:
+    return RuntimeStats(
+        compile_overhead_sec=float("nan"),
+        avg_runtime_sec=float("nan"),
+        p50_runtime_sec=float("nan"),
+        p90_runtime_sec=float("nan"),
+        min_runtime_sec=float("nan"),
+        max_runtime_sec=float("nan"),
+        output_summary="<unavailable>",
+        unavailable_reason=reason,
+    )
+
+
+def _print_runtime_stats(
+    label: str,
+    stats: RuntimeStats,
+    *,
+    include_compile_overhead: bool,
+) -> None:
+    print(f"  {label}:")
+    if stats.unavailable_reason is not None:
+        print(f"    unavailable: {stats.unavailable_reason}")
+        return
+    if include_compile_overhead:
+        print(f"    compile_overhead_ms: {stats.compile_overhead_sec * 1e3:.3f}")
+    print(f"    avg_runtime_ms: {stats.avg_runtime_sec * 1e3:.3f}")
+    print(f"    p50_runtime_ms: {stats.p50_runtime_sec * 1e3:.3f}")
+    print(f"    p90_runtime_ms: {stats.p90_runtime_sec * 1e3:.3f}")
+    print(f"    min_runtime_ms: {stats.min_runtime_sec * 1e3:.3f}")
+    print(f"    max_runtime_ms: {stats.max_runtime_sec * 1e3:.3f}")
+    print(f"    output: {stats.output_summary}")
 
 
 def _normalize_benchmark_workload_names(workload_names: Sequence[str]) -> tuple[str, ...]:
@@ -461,7 +605,7 @@ def _normalize_benchmark_workload_names(workload_names: Sequence[str]) -> tuple[
 
 
 def _block_tree(tree):
-    return jtu.tree_map(lambda x: x.block_until_ready(), tree)
+    return jtu.tree_map(lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x, tree)
 
 
 def _summarize_output(output) -> str:
