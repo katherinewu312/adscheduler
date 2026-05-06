@@ -206,6 +206,7 @@ def main() -> None:
             result.after_compiler_pass,
             include_compile_overhead=True,
         )
+        _print_avg_runtime_delta(result.before_compiler_pass, result.after_compiler_pass)
         print()
 
     if args.json:
@@ -447,6 +448,18 @@ def _benchmark_callable(
         runs=runs,
     )
     transform_result = run_stablehlo_transform_pipeline(stablehlo_program)
+    print(f"\n[{workload_name}] StableHLO transform results:")
+    if not transform_result.transform_results:
+        print("  no transform passes ran")
+    else:
+        for pass_result in transform_result.transform_results:
+            print(f"  - {pass_result.pass_name}")
+            print(f"    metrics: {pass_result.metrics}")
+            if pass_result.details:
+                print("    details:")
+                for detail in pass_result.details[:5]:
+                    print(f"      - {detail}")
+
     after_stats = _benchmark_transformed_stablehlo(
         program=transform_result.transformed_program,
         args=args,
@@ -591,6 +604,15 @@ def _print_runtime_stats(
     print(f"    min_runtime_ms: {stats.min_runtime_sec * 1e3:.3f}")
     print(f"    max_runtime_ms: {stats.max_runtime_sec * 1e3:.3f}")
     print(f"    output: {stats.output_summary}")
+
+
+def _print_avg_runtime_delta(before: RuntimeStats, after: RuntimeStats) -> None:
+    print("  avg_runtime_delta_ms:")
+    if before.unavailable_reason is not None or after.unavailable_reason is not None:
+        print("    unavailable")
+        return
+    delta_ms = (before.avg_runtime_sec - after.avg_runtime_sec) * 1e3
+    print(f"    {delta_ms:.3f}")
 
 
 def _normalize_benchmark_workload_names(workload_names: Sequence[str]) -> tuple[str, ...]:

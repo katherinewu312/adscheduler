@@ -24,6 +24,14 @@ STABLEHLO_OP_RE = re.compile(r'"?(stablehlo\.[\w_]+)"?')
 LOCATION_RE = re.compile(r"\s+loc\([^)]*\)")
 RESULT_PREFIX_RE = re.compile(r"^\s*(?:%[\w.:\-#]+(?:\s*,\s*%[\w.:\-#]+)*\s*=\s*)")
 TYPE_SUFFIX_RE = re.compile(r"\s*:\s*.+$")
+STABLEHLO_BINARY_OP_LINE_RE = re.compile(
+    r"^(?P<indent>\s*)"
+    r"(?P<result>%[\w.:\-#]+)\s*=\s*"
+    r'"?(?P<op>stablehlo\.[\w_]+)"?\s+'
+    r"(?P<lhs>%[\w.:\-#]+)\s*,\s*"
+    r"(?P<rhs>%[\w.:\-#]+)"
+    r"(?P<tail>\s*:.*)$"
+)
 ELEMENTWISE_OPS = {
     "stablehlo.abs",
     "stablehlo.add",
@@ -59,6 +67,15 @@ ELEMENTWISE_OPS = {
     "stablehlo.subtract",
     "stablehlo.tanh",
     "stablehlo.xor",
+}
+COMMUTATIVE_BINARY_OPS = {
+    "stablehlo.add",
+    "stablehlo.multiply",
+    "stablehlo.and",
+    "stablehlo.or",
+    "stablehlo.xor",
+    "stablehlo.maximum",
+    "stablehlo.minimum",
 }
 
 
@@ -192,11 +209,12 @@ def run_stablehlo_transform_pipeline(
 
     The analysis pipeline is intentionally preserved for scoring. This function
     additionally rewrites the StableHLO module with conservative SSA transforms
-    that keep the module in StableHLO text form so another backend can compile
-    it. The executable transforms implemented here are CSE-style duplicate
-    operation elimination and iterative dead-result elimination. Region-level
-    fusion is left to XLA because StableHLO does not expose a portable generic
-    fusion op in the text dialect emitted by JAX.
+    that keep the module in StableHLO text form so another backend can compile it.
+
+    Transform order matters:
+      1. canonicalize commutative operands so CSE sees more equivalent ops
+      2. eliminate duplicate operations
+      3. eliminate newly-dead results
     """
 
     selected_passes = tuple(passes or available_stablehlo_pass_names())
@@ -204,10 +222,15 @@ def run_stablehlo_transform_pipeline(
     stablehlo_text = program.stablehlo_text
     transform_results: list[StableHLOPassResult] = []
 
+    if "commutative_canonicalization" in selected_passes:
+        stablehlo_text, pass_result = _canonicalize_commutative_operations(stablehlo_text)
+        transform_results.append(pass_result)
+
     if "duplicate_operations" in selected_passes:
         stablehlo_text, pass_result = _eliminate_duplicate_operations(stablehlo_text)
         transform_results.append(pass_result)
 
+    # Run DCE last, because CSE can create newly dead ops.
     if "dead_results" in selected_passes:
         stablehlo_text, pass_result = _eliminate_dead_results(stablehlo_text)
         transform_results.append(pass_result)
@@ -282,11 +305,18 @@ def score_stablehlo_optimization_surface(
         for value in pass_metrics.get("expensive_operations", {}).values()
         if isinstance(value, int | float)
     )
+    canonicalized_operations = int(
+        pass_metrics.get("commutative_canonicalization", {}).get(
+            "canonicalizable_operations",
+            0,
+        )
+    )
 
     estimated_optimized_operations = max(
         0.0,
         result.total_operations
         - 0.75 * duplicated_operations
+        - 0.10 * canonicalized_operations
         - 0.25 * max(0, elementwise_ops_in_regions - fusion_regions),
     )
     score = estimated_optimized_operations + 2.0 * expensive_operations
@@ -407,6 +437,29 @@ def _expensive_operation_pass(stablehlo_text: str) -> StableHLOPassResult:
     )
 
 
+def _commutative_canonicalization_pass(stablehlo_text: str) -> StableHLOPassResult:
+    canonicalizable = 0
+    details: list[str] = []
+
+    for line in stablehlo_text.splitlines():
+        binary = STABLEHLO_BINARY_OP_LINE_RE.match(line)
+        if binary is None:
+            continue
+        op_name = binary.group("op")
+        lhs = binary.group("lhs")
+        rhs = binary.group("rhs")
+        if op_name in COMMUTATIVE_BINARY_OPS and rhs < lhs:
+            canonicalizable += 1
+            details.append(f"{op_name}: {lhs}, {rhs} -> {rhs}, {lhs}")
+
+    return StableHLOPassResult(
+        pass_name="commutative_canonicalization",
+        summary="Finds commutative binary operations whose operands can be canonically ordered.",
+        metrics={"canonicalizable_operations": canonicalizable},
+        details=details[:20],
+    )
+
+
 def _operation_lines(stablehlo_text: str) -> list[str]:
     return [
         line.strip()
@@ -428,6 +481,44 @@ def _canonical_operation_signature(line: str) -> str:
     signature = re.sub(r"\s+", " ", signature)
     return signature
 
+
+def _canonicalize_commutative_operations(
+    stablehlo_text: str,
+) -> tuple[str, StableHLOPassResult]:
+    new_lines: list[str] = []
+    changed_details: list[str] = []
+    region_mask = _nested_region_line_mask(stablehlo_text.splitlines())
+
+    for line, in_nested_region in zip(stablehlo_text.splitlines(), region_mask, strict=True):
+        if in_nested_region:
+            new_lines.append(line)
+            continue
+
+        binary = STABLEHLO_BINARY_OP_LINE_RE.match(line)
+        if binary is None:
+            new_lines.append(line)
+            continue
+
+        op_name = binary.group("op")
+        lhs = binary.group("lhs")
+        rhs = binary.group("rhs")
+        if op_name not in COMMUTATIVE_BINARY_OPS or lhs <= rhs:
+            new_lines.append(line)
+            continue
+
+        rewritten = (
+            f"{binary.group('indent')}{binary.group('result')} = "
+            f"{op_name} {rhs}, {lhs}{binary.group('tail')}"
+        )
+        new_lines.append(rewritten)
+        changed_details.append(f"{op_name}: {lhs}, {rhs} -> {rhs}, {lhs}")
+
+    return "\n".join(new_lines), StableHLOPassResult(
+        pass_name="commutative_canonicalization_transform",
+        summary="Canonicalizes operand order for commutative StableHLO binary operations.",
+        metrics={"canonicalized_operations": len(changed_details)},
+        details=changed_details[:20],
+    )
 
 def _eliminate_duplicate_operations(stablehlo_text: str) -> tuple[str, StableHLOPassResult]:
     canonical_values: dict[str, str] = {}
@@ -594,6 +685,7 @@ def _make_pinn_lowering_args(config: PINNBenchmarkConfig):
 
 
 _PASS_REGISTRY: dict[str, Callable[[str], StableHLOPassResult]] = {
+    "commutative_canonicalization": _commutative_canonicalization_pass,
     "duplicate_operations": _duplicate_operation_pass,
     "dead_results": _dead_result_pass,
     "elementwise_fusion_regions": _elementwise_fusion_pass,
