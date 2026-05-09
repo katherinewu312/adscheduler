@@ -35,86 +35,6 @@ class _TensorArgSpec:
     dtype: np.dtype
 
 
-def compile_stablehlo_with_iree(
-    program: StableHLOProgram,
-    *,
-    function_name: str = "main",
-    target_backend: str = "llvm-cpu",
-    target_cpu: str = "generic",
-    target_cpu_features: str = "",
-    driver: str = "local-task",
-) -> StableHLOCompiledExecutable:
-    """Compile StableHLO text into an executable callable using IREE.
-
-    This is intentionally optional: JAX can lower to StableHLO, but executing
-    edited StableHLO text requires a separate compiler/runtime stack. IREE gives
-    us a Python-accessible path from StableHLO MLIR text to a CPU executable.
-    """
-
-    try:
-        import iree.compiler as iree_compiler
-        import iree.runtime as iree_runtime
-    except ImportError as exc:
-        raise StableHLOExecutionUnavailable(
-            "IREE is required to execute transformed StableHLO text. "
-            "Install the optional runtime dependencies with "
-            "`pip install iree-compiler iree-runtime`."
-        ) from exc
-
-    compile_start = time.perf_counter()
-    extra_args = _iree_compile_extra_args(
-        target_backend=target_backend,
-        target_cpu=target_cpu,
-        target_cpu_features=target_cpu_features,
-    )
-    try:
-        vm_flatbuffer = iree_compiler.compile_str(
-            program.stablehlo_text,
-            input_type="stablehlo",
-            target_backends=[target_backend],
-            extra_args=extra_args,
-        )
-    except Exception as exc:
-        raise StableHLOExecutionUnavailable(
-            f"IREE could not compile transformed StableHLO for {program.name}: {exc}"
-        ) from exc
-
-    try:
-        config = iree_runtime.Config(driver)
-        vm_module = iree_runtime.VmModule.copy_buffer(
-            config.vm_instance,
-            vm_flatbuffer,
-        )
-        context = iree_runtime.SystemContext(config=config)
-        if hasattr(context, "add_vm_module"):
-            context.add_vm_module(vm_module)
-        else:
-            context.add_vm_modules(vm_module)
-        module = _runtime_module_from_context(context, vm_module)
-        runtime_fn = getattr(module, function_name)
-    except Exception as exc:
-        raise StableHLOExecutionUnavailable(
-            f"IREE compiled {program.name}, but the runtime function "
-            f"`{function_name}` could not be loaded: {exc}"
-        ) from exc
-
-    compile_overhead_sec = time.perf_counter() - compile_start
-    input_specs = _parse_function_input_specs(program.stablehlo_text, function_name)
-
-    def call_transformed_stablehlo(*args: Any) -> Any:
-        flat_args = [_as_numpy_array(arg) for arg in _flatten_args(args)]
-        runtime_args = _select_runtime_args(flat_args, input_specs)
-        return _normalize_runtime_output(runtime_fn(*runtime_args))
-
-    return StableHLOCompiledExecutable(
-        program_name=program.name,
-        function_name=function_name,
-        backend=f"iree:{target_backend}/{driver}/cpu={target_cpu}",
-        compile_overhead_sec=compile_overhead_sec,
-        callable=call_transformed_stablehlo,
-    )
-
-
 def compile_stablehlo_with_xla(
     program: StableHLOProgram,
     *,
@@ -135,7 +55,7 @@ def compile_stablehlo_with_xla(
         from jaxlib import xla_client
     except ImportError as exc:
         raise StableHLOExecutionUnavailable(
-            "JAX and jaxlib are required to execute transformed StableHLO via XLA/PJRT."
+            "JAX and jaxlib are required to execute StableHLO via XLA/PJRT."
         ) from exc
 
     try:
@@ -150,19 +70,19 @@ def compile_stablehlo_with_xla(
         )
     except Exception as exc:
         raise StableHLOExecutionUnavailable(
-            f"XLA/PJRT could not compile transformed StableHLO for {program.name}: {exc}"
+            f"XLA/PJRT could not compile StableHLO for {program.name}: {exc}"
         ) from exc
     
     input_specs = _parse_function_input_specs(program.stablehlo_text, "main")
 
-    def prepare_transformed_args(*args: Any) -> list[Any]:
+    def prepare_runtime_args(*args: Any) -> list[Any]:
         # This is the expensive Python-side argument setup.
         # Do it once before benchmarking, not once per timed iteration.
         flat_args = [_as_numpy_array(arg) for arg in _flatten_args(args)]
         runtime_args = _select_runtime_args(flat_args, input_specs)
         return [jax.device_put(arg, devices[0]) for arg in runtime_args]
 
-    def call_prepared_transformed_stablehlo(runtime_args: Sequence[Any]) -> Any:
+    def call_prepared_stablehlo(runtime_args: Sequence[Any]) -> Any:
         # This is the actual executable call.
         # Do not normalize to NumPy here; that can force host materialization.
         runtime_args_list = (
@@ -174,10 +94,10 @@ def compile_stablehlo_with_xla(
         except AttributeError:
             return executable.execute_sharded_on_local_devices([runtime_args_list])
 
-    def call_transformed_stablehlo(*args: Any) -> Any:
+    def call_stablehlo(*args: Any) -> Any:
         # Keep the old public behavior for compatibility.
-        runtime_args = prepare_transformed_args(*args)
-        output = call_prepared_transformed_stablehlo(runtime_args)
+        runtime_args = prepare_runtime_args(*args)
+        output = call_prepared_stablehlo(runtime_args)
         return _normalize_runtime_output(output)
 
     return StableHLOCompiledExecutable(
@@ -185,10 +105,11 @@ def compile_stablehlo_with_xla(
         function_name="main",
         backend=f"xla:{platform or jax.default_backend()}",
         compile_overhead_sec=time.perf_counter() - compile_start,
-        callable=call_transformed_stablehlo,
-        prepare_args=prepare_transformed_args,
-        call_prepared=call_prepared_transformed_stablehlo,
+        callable=call_stablehlo,
+        prepare_args=prepare_runtime_args,
+        call_prepared=call_prepared_stablehlo,
     )
+
 
 def _compile_stablehlo_text(
     backend: Any,
@@ -212,104 +133,6 @@ def _compile_stablehlo_text(
             last_error = exc
     assert last_error is not None
     raise last_error
-
-
-def _stablehlo_text_to_xla_computation(stablehlo_text: str, xla_client: Any) -> Any:
-    candidates = []
-    xla_extension = getattr(xla_client, "_xla", None)
-    if xla_extension is not None:
-        candidates.append(getattr(xla_extension, "mlir", None))
-        candidates.append(xla_extension)
-    candidates.append(xla_client)
-
-    function_names = (
-        "mlir_module_to_xla_computation",
-        "mlir_to_xla_computation",
-        "MlirToXlaComputation",
-    )
-    last_error: Exception | None = None
-    encoded = stablehlo_text.encode("utf-8")
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        for function_name in function_names:
-            converter = getattr(candidate, function_name, None)
-            if converter is None:
-                continue
-            for payload in (stablehlo_text, encoded):
-                try:
-                    return converter(payload)
-                except TypeError as exc:
-                    last_error = exc
-                    continue
-                except Exception as exc:
-                    last_error = exc
-                    break
-
-    message = (
-        "This jaxlib build does not expose a StableHLO/MLIR text to XLA "
-        "computation entry point."
-    )
-    if last_error is not None:
-        message += f" Last converter error: {last_error}"
-    raise StableHLOExecutionUnavailable(message)
-
-
-def _iree_compile_extra_args(
-    *,
-    target_backend: str,
-    target_cpu: str,
-    target_cpu_features: str,
-) -> list[str]:
-    if target_backend != "llvm-cpu":
-        return []
-    return [
-        f"--iree-llvmcpu-target-cpu={target_cpu}",
-        f"--iree-llvmcpu-target-cpu-features={target_cpu_features}",
-    ]
-
-
-def _runtime_module_from_context(context: Any, vm_module: Any) -> Any:
-    module_names = [getattr(vm_module, "name", ""), "module"]
-    for module_name in module_names:
-        if not module_name:
-            continue
-        try:
-            module = getattr(context.modules, module_name)
-        except AttributeError:
-            module = None
-        if module is not None and not callable(module):
-            return module
-        try:
-            module = context.modules[module_name]
-        except (KeyError, TypeError, AttributeError):
-            module = None
-        if module is not None and not callable(module):
-            return module
-
-    modules = [
-        getattr(context.modules, name)
-        for name in dir(context.modules)
-        if not name.startswith("_")
-    ]
-    user_modules = [
-        module
-        for module in modules
-        if not callable(module)
-        and (
-            hasattr(module, "main")
-            or not module.__class__.__name__.lower().startswith("hal")
-        )
-    ]
-    if not user_modules:
-        raise StableHLOExecutionUnavailable(
-            f"No executable IREE module was registered. VM module name: "
-            f"{getattr(vm_module, 'name', '<unknown>')}"
-        )
-    for module in user_modules:
-        if hasattr(module, "main"):
-            return module
-    return user_modules[0]
 
 
 def _flatten_args(value: Any) -> list[Any]:
@@ -439,7 +262,7 @@ def _select_runtime_args(
     if not input_specs:
         if flat_args:
             raise StableHLOExecutionUnavailable(
-                "Could not parse the transformed StableHLO @main input signature; "
+                "Could not parse the StableHLO @main input signature; "
                 f"refusing to pass all {len(flat_args)} Python leaves blindly."
             )
         return []
@@ -452,7 +275,7 @@ def _select_runtime_args(
         matched_index = _find_matching_arg(flat_args, spec, search_index)
         if matched_index is None:
             raise StableHLOExecutionUnavailable(
-                "Could not align Python arguments to transformed StableHLO "
+                "Could not align Python arguments to StableHLO "
                 f"signature. Expected tensor shape={spec.shape} dtype={spec.dtype}; "
                 f"remaining Python leaves={_format_arg_specs(flat_args[search_index:])}."
             )

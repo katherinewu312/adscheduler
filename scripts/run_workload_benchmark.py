@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -35,12 +36,10 @@ from adscheduler.stablehlo_execution import (
 from adscheduler.laplacian_benchmark import (
     LaplacianBenchmarkConfig,
     available_laplacian_schedule_names,
-    build_laplacian_schedule_fn,
 )
 from adscheduler.pinn_benchmark import (
     PINNBenchmarkConfig,
     available_pinn_schedule_names,
-    build_pinn_schedule_fn,
 )
 from adscheduler.workloads import (
     available_derivative_workload_names,
@@ -258,7 +257,6 @@ def benchmark_workload(
         selected_schedule_name=None,
         compiler_score_summary=_compiler_score_summary(compiler_score),
         selection_overhead_sec=0.0,
-        fn=workload.derivative_task,
         args=workload.args,
         stablehlo_program=program,
         warmup_runs=warmup_runs,
@@ -294,7 +292,6 @@ def benchmark_auto_mlp_laplacian(
     selected_schedule, selected_score, scored_candidates, selection_overhead_sec = (
         _select_laplacian_schedule_by_stablehlo(config)
     )
-    schedule_fn = build_laplacian_schedule_fn(selected_schedule)
     description = _compiler_auto_description(
         candidate_kind="Laplacian schedules",
         selected_name=selected_schedule,
@@ -307,7 +304,6 @@ def benchmark_auto_mlp_laplacian(
         selected_schedule_name=selected_schedule,
         compiler_score_summary=_compiler_score_summary(selected_score),
         selection_overhead_sec=selection_overhead_sec,
-        fn=schedule_fn,
         args=(params, points),
         stablehlo_program=lower_laplacian_schedule_to_stablehlo(
             selected_schedule,
@@ -341,7 +337,6 @@ def benchmark_auto_poisson_pinn(
     selected_schedule, selected_score, scored_candidates, selection_overhead_sec = (
         _select_pinn_schedule_by_stablehlo(config)
     )
-    schedule_fn = build_pinn_schedule_fn(selected_schedule)
     description = _compiler_auto_description(
         candidate_kind="PINN schedules",
         selected_name=selected_schedule,
@@ -354,7 +349,6 @@ def benchmark_auto_poisson_pinn(
         selected_schedule_name=selected_schedule,
         compiler_score_summary=_compiler_score_summary(selected_score),
         selection_overhead_sec=selection_overhead_sec,
-        fn=schedule_fn,
         args=(params, points),
         stablehlo_program=lower_pinn_schedule_to_stablehlo(
             selected_schedule,
@@ -410,13 +404,6 @@ def _compiler_auto_description(
     )
 
 
-def _compiler_score_summary_for_workload(workload_name: str, *, seed: int) -> str:
-    program = lower_workload_to_stablehlo(workload_name, seed=seed)
-    pipeline_result = run_stablehlo_pass_pipeline(program)
-    compiler_score = score_stablehlo_optimization_surface(pipeline_result)
-    return _compiler_score_summary(compiler_score)
-
-
 def _compiler_score_summary(score) -> str:
     return (
         f"score={score.score:.3f} "
@@ -435,20 +422,28 @@ def _benchmark_callable(
     selected_schedule_name: str | None,
     compiler_score_summary: str | None,
     selection_overhead_sec: float,
-    fn,
     args: tuple,
     stablehlo_program: StableHLOProgram,
     warmup_runs: int,
     runs: int,
 ) -> WorkloadBenchmarkResult:
-    before_stats = _benchmark_jax_callable(
-        fn=fn,
+    before_stats = _benchmark_stablehlo_program(
+        program=stablehlo_program,
         args=args,
         warmup_runs=warmup_runs,
         runs=runs,
+        execution_label="original StableHLO",
     )
     transform_result = run_stablehlo_transform_pipeline(stablehlo_program)
+    original_fingerprint = _stablehlo_fingerprint(transform_result.original_program)
+    transformed_fingerprint = _stablehlo_fingerprint(transform_result.transformed_program)
     print(f"\n[{workload_name}] StableHLO transform results:")
+    print(f"  original_stablehlo_sha256: {original_fingerprint}")
+    print(f"  transformed_stablehlo_sha256: {transformed_fingerprint}")
+    print(
+        "  transformed_text_changed: "
+        f"{transform_result.original_program.stablehlo_text != transform_result.transformed_program.stablehlo_text}"
+    )
     if not transform_result.transform_results:
         print("  no transform passes ran")
     else:
@@ -460,11 +455,13 @@ def _benchmark_callable(
                 for detail in pass_result.details[:5]:
                     print(f"      - {detail}")
 
-    after_stats = _benchmark_transformed_stablehlo(
+    after_stats = _benchmark_stablehlo_program(
+        original_program=transform_result.original_program,
         program=transform_result.transformed_program,
         args=args,
         warmup_runs=warmup_runs,
         runs=runs,
+        execution_label="transformed StableHLO",
     )
     return WorkloadBenchmarkResult(
         workload_name=workload_name,
@@ -477,54 +474,21 @@ def _benchmark_callable(
     )
 
 
-def _benchmark_jax_callable(
-    *,
-    fn,
-    args: tuple,
-    warmup_runs: int,
-    runs: int,
-) -> RuntimeStats:
-    jitted_task = jax.jit(fn)
-
-    compile_start = time.perf_counter()
-    try:
-        compiled_task = jitted_task.lower(*args).compile()
-    except AttributeError:
-        compiled_task = jitted_task
-    output = compiled_task(*args)
-    _block_tree(output)
-    compile_overhead_sec = time.perf_counter() - compile_start
-
-    for _ in range(warmup_runs):
-        output = compiled_task(*args)
-        _block_tree(output)
-
-    timings = []
-    for _ in range(runs):
-        start = time.perf_counter()
-        output = compiled_task(*args)
-        _block_tree(output)
-        timings.append(time.perf_counter() - start)
-
-    timings_arr = np.asarray(timings, dtype=np.float64)
-    return RuntimeStats(
-        compile_overhead_sec=compile_overhead_sec,
-        avg_runtime_sec=float(np.mean(timings_arr)),
-        p50_runtime_sec=float(np.percentile(timings_arr, 50)),
-        p90_runtime_sec=float(np.percentile(timings_arr, 90)),
-        min_runtime_sec=float(np.min(timings_arr)),
-        max_runtime_sec=float(np.max(timings_arr)),
-        output_summary=_summarize_output(output),
-    )
-
-
-def _benchmark_transformed_stablehlo(
+def _benchmark_stablehlo_program(
     *,
     program: StableHLOProgram,
     args: tuple,
     warmup_runs: int,
     runs: int,
+    execution_label: str,
+    original_program: StableHLOProgram | None = None,
 ) -> RuntimeStats:
+    if original_program is not None and program.stablehlo_text == original_program.stablehlo_text:
+        return _unavailable_runtime_stats(
+            "StableHLO transform produced identical text; refusing to report "
+            "after-pass timing as optimized code."
+        )
+
     try:
         executable = compile_stablehlo_with_xla(program)
     except StableHLOExecutionUnavailable as exc:
@@ -558,7 +522,7 @@ def _benchmark_transformed_stablehlo(
 
     except Exception as exc:
         return _unavailable_runtime_stats(
-            f"XLA/PJRT compiled transformed StableHLO but execution failed: {exc}"
+            f"XLA/PJRT compiled {execution_label} but execution failed: {exc}"
         )
 
     timings_arr = np.asarray(timings, dtype=np.float64)
@@ -586,6 +550,10 @@ def _unavailable_runtime_stats(reason: str) -> RuntimeStats:
     )
 
 
+def _stablehlo_fingerprint(program: StableHLOProgram) -> str:
+    return hashlib.sha256(program.stablehlo_text.encode("utf-8")).hexdigest()[:16]
+
+
 def _print_runtime_stats(
     label: str,
     stats: RuntimeStats,
@@ -607,7 +575,7 @@ def _print_runtime_stats(
 
 
 def _print_avg_runtime_delta(before: RuntimeStats, after: RuntimeStats) -> None:
-    print("  avg_runtime_delta_ms:")
+    print("  avg_runtime_delta_ms_before_minus_after:")
     if before.unavailable_reason is not None or after.unavailable_reason is not None:
         print("    unavailable")
         return
