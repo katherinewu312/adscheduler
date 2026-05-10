@@ -13,6 +13,22 @@ from adscheduler.pinn_benchmark import PINNBenchmarkConfig
 
 Array = jax.Array
 
+'''
+Laplacian benchmark:
+  fixed random MLP params
+  fixed batch of input points
+  compute Delta f(x) at each point
+  output shape = (num_points,)
+
+Poisson PINN benchmark:
+  fixed random MLP params
+  fixed 2D collocation grid
+  compute PDE residual using Delta u(x,y)
+  compute loss = mean(residual²)
+  compute gradient of that loss wrt params
+  output = scalar loss + parameter-gradient tree
+'''
+
 
 @dataclass(frozen=True)
 class DerivativeWorkload:
@@ -172,6 +188,7 @@ def _make_poisson_pinn_strategy_workload(
         axis=1,
     )
 
+    # This is the NN itself.
     def nn_scalar(nn_params: tuple[tuple[Array, Array], ...], coord: Array) -> Array:
         activations = coord
         for weights, bias in nn_params[:-1]:
@@ -179,11 +196,13 @@ def _make_poisson_pinn_strategy_workload(
         final_weights, final_bias = nn_params[-1]
         return jnp.squeeze(activations @ final_weights + final_bias)
 
+    # Define: u(x,y) = x(1-x)y(1-y) * NN(x,y)
     def trial_solution(nn_params: tuple[tuple[Array, Array], ...], coord: Array) -> Array:
         x, y = coord
         boundary_factor = x * (1.0 - x) * y * (1.0 - y)
         return boundary_factor * nn_scalar(nn_params, coord)
 
+    # Compute a Poisson residual: residual(x,y) = Delta u(x,y) + forcing(x,y)
     def poisson_residual_at_point(
         nn_params: tuple[tuple[Array, Array], ...],
         coord: Array,
@@ -220,6 +239,7 @@ def _make_poisson_pinn_strategy_workload(
         forcing = jnp.sin(jnp.pi * coord[0]) * jnp.sin(jnp.pi * coord[1])
         return laplacian + forcing
 
+    # (loss, gradient_of_loss_wrt_network_parameters)
     def pinn_loss(nn_params: tuple[tuple[Array, Array], ...], points: Array) -> Array:
         residuals = jax.vmap(partial(poisson_residual_at_point, nn_params))(points)
         return jnp.mean(residuals**2)
@@ -288,6 +308,7 @@ def _make_mlp_laplacian_strategy_workload(
         config.input_dim,
     )
 
+    # This is the MLP itself.
     def mlp_scalar(mlp_params: tuple[tuple[Array, Array], ...], x: Array) -> Array:
         activations = x
         for weights, bias in mlp_params[:-1]:
@@ -295,13 +316,13 @@ def _make_mlp_laplacian_strategy_workload(
         final_weights, final_bias = mlp_params[-1]
         output = activations @ final_weights + final_bias
         return jnp.squeeze(output)
-
+    
     def laplacian_at_point(
         mlp_params: tuple[tuple[Array, Array], ...],
         x: Array,
     ) -> Array:
         basis = jnp.eye(x.shape[0], dtype=x.dtype)
-        scalar_fn = lambda z: mlp_scalar(mlp_params, z)
+        scalar_fn = lambda z: mlp_scalar(mlp_params, z) # The scalar MLP.
 
         if strategy == "hessian":
             hessian = jax.hessian(scalar_fn)(x)
