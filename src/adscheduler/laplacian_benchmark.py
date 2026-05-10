@@ -49,6 +49,7 @@ class LaplacianBenchmarkConfig:
     input_dim: int = 3
     hidden_dim: int = 256
     hidden_layers: int = 128
+    activation: str = "tanh"
     target_max_abs_error: float = 1e-4
 
 
@@ -784,6 +785,8 @@ def _validate_config(config: LaplacianBenchmarkConfig) -> None:
         raise ValueError("hidden_dim must be >= 1")
     if config.hidden_layers < 1:
         raise ValueError("hidden_layers must be >= 1")
+    if config.activation != "tanh":
+        raise ValueError("Only activation='tanh' is currently supported")
     if config.target_max_abs_error < 0:
         raise ValueError("target_max_abs_error must be >= 0")
 
