@@ -394,6 +394,7 @@ def _compiler_auto_description(
         f"{name}:score={score.score:.3f},ops={score.total_operations},"
         f"lap_recur={score.laplacian_recurrence_rewrites},"
         f"const_folds={score.constant_foldable_operations},"
+        f"zero_elims={score.structural_zero_eliminations},"
         f"mixed_partial={score.mixed_partial_cse_rewrites},"
         f"symm_kernel={score.symmetric_kernel_rewrites}"
         for name, score in scored_candidates
@@ -414,6 +415,7 @@ def _compiler_score_summary(score) -> str:
         f"ops={score.total_operations} "
         f"lap_recur={score.laplacian_recurrence_rewrites} "
         f"const_folds={score.constant_foldable_operations} "
+        f"zero_elims={score.structural_zero_eliminations} "
         f"mixed_partial={score.mixed_partial_cse_rewrites} "
         f"symm_kernel={score.symmetric_kernel_rewrites}"
     )

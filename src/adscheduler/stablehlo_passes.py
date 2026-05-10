@@ -75,9 +75,23 @@ CONSTANT_FOLDABLE_BINARY_OPS = {
     "stablehlo.power",
     "stablehlo.subtract",
 }
+ZERO_PRESERVING_UNARY_OPS = {
+    "stablehlo.broadcast_in_dim",
+    "stablehlo.convert",
+    "stablehlo.reshape",
+    "stablehlo.slice",
+    "stablehlo.transpose",
+}
+ZERO_ABSORBING_BINARY_OPS = {
+    "stablehlo.multiply",
+}
+ZERO_ABSORBING_ANY_OPERAND_OPS = {
+    "stablehlo.dot_general",
+}
 DEFAULT_STABLEHLO_PASS_NAMES = (
     "tanh_mlp_laplacian_recurrence",
     "derivative_constant_propagation",
+    "structural_zero_elimination",
 )
 LAPLACIAN_PROGRAM_PREFIXES = (
     "mlp_laplacian",
@@ -127,6 +141,7 @@ class StableHLOCompilerScore:
     total_operations: int
     laplacian_recurrence_rewrites: int
     constant_foldable_operations: int
+    structural_zero_eliminations: int
     mixed_partial_cse_rewrites: int
     symmetric_kernel_rewrites: int
 
@@ -229,7 +244,8 @@ def run_stablehlo_transform_pipeline(
     Transform order matters:
       1. replace known nested input-AD Laplacians with direct tanh-MLP Laplacian recurrences
       2. fold derivative-generated scalar/splat constants
-      3. optionally run metadata-dependent experimental transforms
+      3. eliminate structurally zero tangent/cotangent lanes exposed by constant propagation
+      4. optionally run metadata-dependent experimental transforms
     """
 
     selected_passes = tuple(passes or default_stablehlo_pass_names())
@@ -248,6 +264,14 @@ def run_stablehlo_transform_pipeline(
 
     if "derivative_constant_propagation" in selected_passes:
         stablehlo_text, pass_result = _propagate_derivative_constants(stablehlo_text)
+        current_program = StableHLOProgram(
+            name=current_program.name,
+            stablehlo_text=stablehlo_text,
+        )
+        transform_results.append(pass_result)
+
+    if "structural_zero_elimination" in selected_passes:
+        stablehlo_text, pass_result = _eliminate_structural_zeros(stablehlo_text)
         current_program = StableHLOProgram(
             name=current_program.name,
             stablehlo_text=stablehlo_text,
@@ -332,6 +356,12 @@ def score_stablehlo_optimization_surface(
             0,
         )
     )
+    structural_zero_eliminations = int(
+        pass_metrics.get("structural_zero_elimination", {}).get(
+            "eliminated_operations",
+            0,
+        )
+    )
     mixed_partial_cse_rewrites = int(
         pass_metrics.get("mixed_partial_cse", {}).get("rewritable_equivalents", 0)
     )
@@ -344,6 +374,7 @@ def score_stablehlo_optimization_surface(
         result.total_operations
         - 500.00 * laplacian_recurrence_rewrites
         - 0.75 * constant_foldable_operations
+        - 1.25 * structural_zero_eliminations
         - 2.00 * mixed_partial_cse_rewrites
         - 3.00 * symmetric_kernel_rewrites,
     )
@@ -355,6 +386,7 @@ def score_stablehlo_optimization_surface(
         total_operations=result.total_operations,
         laplacian_recurrence_rewrites=laplacian_recurrence_rewrites,
         constant_foldable_operations=constant_foldable_operations,
+        structural_zero_eliminations=structural_zero_eliminations,
         mixed_partial_cse_rewrites=mixed_partial_cse_rewrites,
         symmetric_kernel_rewrites=symmetric_kernel_rewrites,
     )
@@ -399,6 +431,24 @@ def _derivative_constant_propagation_pass(program: StableHLOProgram) -> StableHL
             "constant_preserving_folds": result.metrics["constant_preserving_folds"],
             "unary_folds": result.metrics["unary_folds"],
             "binary_folds": result.metrics["binary_folds"],
+        },
+        details=result.details,
+    )
+
+
+def _structural_zero_elimination_pass(program: StableHLOProgram) -> StableHLOPassResult:
+    _, result = _eliminate_structural_zeros(program.stablehlo_text)
+    return StableHLOPassResult(
+        pass_name="structural_zero_elimination",
+        summary=(
+            "Tracks AD-created zero tangent/cotangent lanes through StableHLO and "
+            "removes operations whose result is structurally zero or an add/subtract-by-zero alias."
+        ),
+        metrics={
+            "known_zero_values": result.metrics["known_zero_values"],
+            "eliminated_operations": result.metrics["eliminated_operations"],
+            "zero_rewrites": result.metrics["zero_rewrites"],
+            "alias_rewrites": result.metrics["alias_rewrites"],
         },
         details=result.details,
     )
@@ -551,6 +601,161 @@ def _propagate_derivative_constants(
             "constant_preserving_folds": constant_preserving_folds,
             "unary_folds": unary_folds,
             "binary_folds": binary_folds,
+        },
+        details=details[:20],
+    )
+
+
+def _eliminate_structural_zeros(
+    stablehlo_text: str,
+) -> tuple[str, StableHLOPassResult]:
+    lines = stablehlo_text.splitlines()
+    region_mask = _nested_region_line_mask(lines)
+    replacements: dict[str, str] = {}
+    zero_values: dict[str, str] = {}
+    new_lines: list[str] = []
+    details: list[str] = []
+    zero_rewrites = 0
+    alias_rewrites = 0
+
+    for line, in_nested_region in zip(lines, region_mask, strict=True):
+        if line.strip().startswith("func.func"):
+            replacements = {}
+            zero_values = {}
+            new_lines.append(line)
+            continue
+
+        rewritten_line = _replace_ssa_values(line, replacements)
+        if in_nested_region:
+            new_lines.append(rewritten_line)
+            continue
+
+        parsed_constant = _parse_scalar_constant_with_type(rewritten_line)
+        if parsed_constant is not None:
+            result_name, value, tensor_type = parsed_constant
+            if _is_zero_constant_value(value):
+                zero_values[result_name] = tensor_type
+            else:
+                zero_values.pop(result_name, None)
+            new_lines.append(rewritten_line)
+            continue
+
+        unary = STABLEHLO_UNARY_OP_LINE_RE.match(rewritten_line)
+        if unary is not None:
+            result_name = unary.group("result")
+            op_name = unary.group("op")
+            input_name = unary.group("input")
+            output_type = _output_tensor_type(rewritten_line)
+            if (
+                op_name in ZERO_PRESERVING_UNARY_OPS
+                and input_name in zero_values
+                and output_type is not None
+            ):
+                zero_values[result_name] = output_type
+                new_lines.append(
+                    _constant_line(
+                        unary.group("indent"),
+                        result_name,
+                        0,
+                        output_type,
+                    )
+                )
+                zero_rewrites += 1
+                details.append(f"{result_name}: {op_name} structural zero -> zero")
+                continue
+
+        binary = STABLEHLO_BINARY_OP_LINE_RE.match(rewritten_line)
+        if binary is not None:
+            result_name = binary.group("result")
+            op_name = binary.group("op")
+            lhs_name = binary.group("lhs")
+            rhs_name = binary.group("rhs")
+            lhs_zero = lhs_name in zero_values
+            rhs_zero = rhs_name in zero_values
+            output_type = _output_tensor_type(rewritten_line)
+
+            if op_name == "stablehlo.add":
+                if lhs_zero and not rhs_zero:
+                    replacements[result_name] = rhs_name
+                    zero_values.pop(result_name, None)
+                    alias_rewrites += 1
+                    details.append(f"{result_name}: add structural zero lhs -> {rhs_name}")
+                    continue
+                if rhs_zero and not lhs_zero:
+                    replacements[result_name] = lhs_name
+                    zero_values.pop(result_name, None)
+                    alias_rewrites += 1
+                    details.append(f"{result_name}: add structural zero rhs -> {lhs_name}")
+                    continue
+                if lhs_zero and rhs_zero and output_type is not None:
+                    zero_values[result_name] = output_type
+                    new_lines.append(
+                        _constant_line(binary.group("indent"), result_name, 0, output_type)
+                    )
+                    zero_rewrites += 1
+                    details.append(f"{result_name}: add structural zeros -> zero")
+                    continue
+
+            if op_name == "stablehlo.subtract":
+                if rhs_zero and not lhs_zero:
+                    replacements[result_name] = lhs_name
+                    zero_values.pop(result_name, None)
+                    alias_rewrites += 1
+                    details.append(f"{result_name}: subtract structural zero rhs -> {lhs_name}")
+                    continue
+                if lhs_zero and rhs_zero and output_type is not None:
+                    zero_values[result_name] = output_type
+                    new_lines.append(
+                        _constant_line(binary.group("indent"), result_name, 0, output_type)
+                    )
+                    zero_rewrites += 1
+                    details.append(f"{result_name}: subtract structural zeros -> zero")
+                    continue
+
+            if (
+                op_name in ZERO_ABSORBING_BINARY_OPS
+                and (lhs_zero or rhs_zero)
+                and output_type is not None
+            ):
+                zero_values[result_name] = output_type
+                new_lines.append(
+                    _constant_line(binary.group("indent"), result_name, 0, output_type)
+                )
+                zero_rewrites += 1
+                details.append(f"{result_name}: {op_name} structural zero operand -> zero")
+                continue
+
+        result_name = _single_result_name(rewritten_line)
+        op_name = _operation_name(rewritten_line)
+        output_type = _output_tensor_type(rewritten_line)
+        if (
+            result_name is not None
+            and op_name in ZERO_ABSORBING_ANY_OPERAND_OPS
+            and output_type is not None
+        ):
+            operands = _operation_operand_values(rewritten_line)
+            if any(operand in zero_values for operand in operands):
+                zero_values[result_name] = output_type
+                indent = rewritten_line[: len(rewritten_line) - len(rewritten_line.lstrip())]
+                new_lines.append(_constant_line(indent, result_name, 0, output_type))
+                zero_rewrites += 1
+                details.append(f"{result_name}: {op_name} structural zero operand -> zero")
+                continue
+
+        if result_name is not None:
+            zero_values.pop(result_name, None)
+        new_lines.append(rewritten_line)
+
+    eliminated_operations = zero_rewrites + alias_rewrites
+    transformed_text = "\n".join(new_lines) if eliminated_operations else stablehlo_text
+    return transformed_text, StableHLOPassResult(
+        pass_name="structural_zero_elimination_transform",
+        summary="Eliminates structurally zero AD tangent/cotangent operations.",
+        metrics={
+            "known_zero_values": len(zero_values),
+            "eliminated_operations": eliminated_operations,
+            "zero_rewrites": zero_rewrites,
+            "alias_rewrites": alias_rewrites,
         },
         details=details[:20],
     )
@@ -762,6 +967,16 @@ def _tanh_mlp_value_grad_laplacian(params, x):
 
 
 def _parse_scalar_constant_line(line: str) -> tuple[str, float | int | bool] | None:
+    parsed = _parse_scalar_constant_with_type(line)
+    if parsed is None:
+        return None
+    result_name, value, _ = parsed
+    return result_name, value
+
+
+def _parse_scalar_constant_with_type(
+    line: str,
+) -> tuple[str, float | int | bool, str] | None:
     match = STABLEHLO_CONSTANT_RE.match(line.strip())
     if match is None:
         return None
@@ -773,7 +988,11 @@ def _parse_scalar_constant_line(line: str) -> tuple[str, float | int | bool] | N
     parsed = _parse_constant_value(value_text)
     if parsed is None:
         return None
-    return match.group("result"), parsed
+    return match.group("result"), parsed, match.group("type")
+
+
+def _is_zero_constant_value(value: float | int | bool) -> bool:
+    return not isinstance(value, bool) and float(value) == 0.0
 
 
 def _parse_constant_value(value_text: str) -> float | int | bool | None:
@@ -941,6 +1160,29 @@ def _single_result_name(line: str) -> str | None:
     return values[0]
 
 
+def _replace_ssa_values(line: str, replacements: dict[str, str]) -> str:
+    if not replacements:
+        return line
+
+    def replace(match: re.Match[str]) -> str:
+        value = match.group(0)
+        return replacements.get(value, value)
+
+    return SSA_VALUE_RE.sub(replace, line)
+
+
+def _operation_name(line: str) -> str:
+    match = DIALECT_OP_RE.search(line)
+    return match.group(1) if match is not None else ""
+
+
+def _operation_operand_values(line: str) -> list[str]:
+    if "=" not in line:
+        return SSA_VALUE_RE.findall(line)
+    rhs = line.split("=", 1)[1]
+    return SSA_VALUE_RE.findall(rhs)
+
+
 def _make_laplacian_lowering_args(config: LaplacianBenchmarkConfig):
     from adscheduler.laplacian_benchmark import _initialize_laplacian_state
 
@@ -958,6 +1200,7 @@ def _make_pinn_lowering_args(config: PINNBenchmarkConfig):
 _PASS_REGISTRY: dict[str, Callable[[StableHLOProgram], StableHLOPassResult]] = {
     "tanh_mlp_laplacian_recurrence": _tanh_mlp_laplacian_recurrence_pass,
     "derivative_constant_propagation": _derivative_constant_propagation_pass,
+    "structural_zero_elimination": _structural_zero_elimination_pass,
     "mixed_partial_cse": _mixed_partial_cse_pass,
     "symmetric_kernel_rewriting": _symmetric_kernel_rewriting_pass,
 }

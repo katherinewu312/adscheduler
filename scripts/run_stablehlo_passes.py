@@ -135,6 +135,7 @@ def main() -> None:
         print(f"  estimated_optimized_operations: {score.estimated_optimized_operations:.3f}")
         print(f"  laplacian_recurrence_rewrites: {score.laplacian_recurrence_rewrites}")
         print(f"  constant_foldable_operations: {score.constant_foldable_operations}")
+        print(f"  structural_zero_eliminations: {score.structural_zero_eliminations}")
         print(f"  mixed_partial_cse_rewrites: {score.mixed_partial_cse_rewrites}")
         print(f"  symmetric_kernel_rewrites: {score.symmetric_kernel_rewrites}")
         print()
