@@ -20,6 +20,7 @@ from adscheduler.pinn_benchmark import (
 )
 from adscheduler.stablehlo_passes import (
     available_stablehlo_pass_names,
+    default_stablehlo_pass_names,
     format_stablehlo_pipeline_report,
     lower_laplacian_schedule_to_stablehlo,
     lower_pinn_schedule_to_stablehlo,
@@ -61,7 +62,10 @@ def parse_args() -> argparse.Namespace:
         action="append",
         choices=available_stablehlo_pass_names(),
         dest="passes",
-        help="StableHLO pass to run. Repeat for multiple. Defaults to all passes.",
+        help=(
+            "StableHLO pass to run. Repeat for multiple. Defaults to: "
+            f"{', '.join(default_stablehlo_pass_names())}."
+        ),
     )
     parser.add_argument(
         "--print-stablehlo",
@@ -69,12 +73,12 @@ def parse_args() -> argparse.Namespace:
         help="Print the StableHLO module text before the pass report.",
     )
 
-    parser.add_argument("--laplacian-num-points", type=int, default=32)
+    parser.add_argument("--laplacian-num-points", type=int, default=64)
     parser.add_argument("--laplacian-input-dim", type=int, default=3)
     parser.add_argument("--laplacian-hidden-layers", type=int, default=64)
     parser.add_argument("--laplacian-hidden-dim", type=int, default=128)
 
-    parser.add_argument("--pinn-grid-size", type=int, default=5)
+    parser.add_argument("--pinn-grid-size", type=int, default=10)
     parser.add_argument("--pinn-hidden-layers", type=int, default=6)
     parser.add_argument("--pinn-hidden-dim", type=int, default=64)
     return parser.parse_args()
@@ -129,9 +133,10 @@ def main() -> None:
         print("compiler_score:")
         print(f"  score: {score.score:.3f}")
         print(f"  estimated_optimized_operations: {score.estimated_optimized_operations:.3f}")
-        print(f"  duplicated_operations: {score.duplicated_operations}")
-        print(f"  fusion_regions: {score.fusion_regions}")
-        print(f"  expensive_operations: {score.expensive_operations}")
+        print(f"  laplacian_recurrence_rewrites: {score.laplacian_recurrence_rewrites}")
+        print(f"  constant_foldable_operations: {score.constant_foldable_operations}")
+        print(f"  mixed_partial_cse_rewrites: {score.mixed_partial_cse_rewrites}")
+        print(f"  symmetric_kernel_rewrites: {score.symmetric_kernel_rewrites}")
         print()
 
 

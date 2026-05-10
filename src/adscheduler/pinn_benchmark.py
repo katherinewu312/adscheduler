@@ -45,7 +45,7 @@ class PINNBenchmarkConfig:
     seed: int = 0
     outer_steps: int = 30
     eval_every: int = 10
-    grid_size: int = 5
+    grid_size: int = 10
     input_dim: int = 2
     hidden_layers: int = 6
     hidden_dim: int = 64

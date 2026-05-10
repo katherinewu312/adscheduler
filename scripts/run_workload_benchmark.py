@@ -392,7 +392,10 @@ def _compiler_auto_description(
 ) -> str:
     score_summary = "; ".join(
         f"{name}:score={score.score:.3f},ops={score.total_operations},"
-        f"dups={score.duplicated_operations},fusion_regions={score.fusion_regions}"
+        f"lap_recur={score.laplacian_recurrence_rewrites},"
+        f"const_folds={score.constant_foldable_operations},"
+        f"mixed_partial={score.mixed_partial_cse_rewrites},"
+        f"symm_kernel={score.symmetric_kernel_rewrites}"
         for name, score in scored_candidates
     )
     return (
@@ -409,9 +412,10 @@ def _compiler_score_summary(score) -> str:
         f"score={score.score:.3f} "
         f"estimated_optimized_ops={score.estimated_optimized_operations:.3f} "
         f"ops={score.total_operations} "
-        f"dups={score.duplicated_operations} "
-        f"fusion_regions={score.fusion_regions} "
-        f"expensive_ops={score.expensive_operations}"
+        f"lap_recur={score.laplacian_recurrence_rewrites} "
+        f"const_folds={score.constant_foldable_operations} "
+        f"mixed_partial={score.mixed_partial_cse_rewrites} "
+        f"symm_kernel={score.symmetric_kernel_rewrites}"
     )
 
 
@@ -434,7 +438,10 @@ def _benchmark_callable(
         runs=runs,
         execution_label="original StableHLO",
     )
-    transform_result = run_stablehlo_transform_pipeline(stablehlo_program)
+    transform_result = run_stablehlo_transform_pipeline(
+        stablehlo_program,
+        source_args=args,
+    )
     original_fingerprint = _stablehlo_fingerprint(transform_result.original_program)
     transformed_fingerprint = _stablehlo_fingerprint(transform_result.transformed_program)
     print(f"\n[{workload_name}] StableHLO transform results:")

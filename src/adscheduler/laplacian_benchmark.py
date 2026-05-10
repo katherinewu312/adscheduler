@@ -45,7 +45,7 @@ class LaplacianBenchmarkConfig:
     seed: int = 0
     outer_steps: int = 100
     eval_every: int = 10
-    num_points: int = 32
+    num_points: int = 64
     input_dim: int = 3
     hidden_dim: int = 128
     hidden_layers: int = 64

@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--outer-steps", type=int, default=30)
     parser.add_argument("--eval-every", type=int, default=10)
-    parser.add_argument("--grid-size", type=int, default=5)
+    parser.add_argument("--grid-size", type=int, default=10)
     parser.add_argument("--input-dim", type=int, default=2)
     parser.add_argument("--hidden-layers", type=int, default=6)
     parser.add_argument("--hidden-dim", type=int, default=64)

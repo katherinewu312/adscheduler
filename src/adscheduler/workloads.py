@@ -10,6 +10,15 @@ from jax.experimental import jet
 
 Array = jax.Array
 
+MLP_LAPLACIAN_INPUT_DIM = 3
+MLP_LAPLACIAN_NUM_POINTS = 64
+MLP_LAPLACIAN_HIDDEN_DIM = 128
+MLP_LAPLACIAN_HIDDEN_LAYERS = 64
+
+POISSON_PINN_GRID_SIZE = 10
+POISSON_PINN_HIDDEN_DIM = 64
+POISSON_PINN_HIDDEN_LAYERS = 6
+
 
 @dataclass(frozen=True)
 class DerivativeWorkload:
@@ -155,9 +164,11 @@ def _make_poisson_pinn_strategy_workload(
 ) -> DerivativeWorkload:
     params = _init_mlp_params(
         seed=seed,
-        layer_dims=(2, 64, 64, 64, 64, 64, 64, 1),
+        layer_dims=tuple(
+            [2] + [POISSON_PINN_HIDDEN_DIM] * POISSON_PINN_HIDDEN_LAYERS + [1]
+        ),
     )
-    grid = jnp.linspace(0.1, 0.9, 5, dtype=jnp.float32)
+    grid = jnp.linspace(0.1, 0.9, POISSON_PINN_GRID_SIZE, dtype=jnp.float32)
     mesh_x, mesh_y = jnp.meshgrid(grid, grid, indexing="ij")
     collocation_points = jnp.stack(
         [mesh_x.reshape(-1), mesh_y.reshape(-1)],
@@ -226,7 +237,10 @@ def _make_poisson_pinn_strategy_workload(
         name=name,
         description=(
             "Training loss and parameter gradient for a Poisson PINN with "
-            "u=x(1-x)y(1-y)NN(x,y), a 6-layer tanh MLP with hidden size 64, "
+            "u=x(1-x)y(1-y)NN(x,y), a "
+            f"{POISSON_PINN_HIDDEN_LAYERS}-layer tanh MLP with hidden size "
+            f"{POISSON_PINN_HIDDEN_DIM}, evaluated on a "
+            f"{POISSON_PINN_GRID_SIZE}x{POISSON_PINN_GRID_SIZE} collocation grid, "
             "where the loss differentiates through "
             f"second input derivatives via {_poisson_pinn_strategy_description(strategy)}"
             "."
@@ -262,11 +276,19 @@ def _make_mlp_laplacian_strategy_workload(
 ) -> DerivativeWorkload:
     params = _init_mlp_laplacian_params(
         seed=seed,
-        input_dim=3,
-        hidden_dim=128,
-        hidden_layers=64,
+        input_dim=MLP_LAPLACIAN_INPUT_DIM,
+        hidden_dim=MLP_LAPLACIAN_HIDDEN_DIM,
+        hidden_layers=MLP_LAPLACIAN_HIDDEN_LAYERS,
     )
-    points = jnp.linspace(-1.0, 1.0, 15, dtype=jnp.float32).reshape(5, 3)
+    points = jnp.linspace(
+        -1.0,
+        1.0,
+        MLP_LAPLACIAN_NUM_POINTS * MLP_LAPLACIAN_INPUT_DIM,
+        dtype=jnp.float32,
+    ).reshape(
+        MLP_LAPLACIAN_NUM_POINTS,
+        MLP_LAPLACIAN_INPUT_DIM,
+    )
 
     def mlp_scalar(mlp_params: tuple[tuple[Array, Array], ...], x: Array) -> Array:
         activations = x
@@ -316,7 +338,10 @@ def _make_mlp_laplacian_strategy_workload(
     return DerivativeWorkload(
         name=name,
         description=(
-            "Input-space Laplacian of a 64-layer JAX MLP with hidden size 128 via "
+            "Input-space Laplacian of a "
+            f"{MLP_LAPLACIAN_HIDDEN_LAYERS}-layer JAX MLP with hidden size "
+            f"{MLP_LAPLACIAN_HIDDEN_DIM}, evaluated at "
+            f"{MLP_LAPLACIAN_NUM_POINTS} points, via "
             f"{_make_mlp_laplacian_strategy_description(strategy)}."
         ),
         derivative_task=derivative_task,
