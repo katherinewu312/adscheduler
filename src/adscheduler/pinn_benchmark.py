@@ -43,12 +43,12 @@ PINN_SCHEDULES = (
 @dataclass(frozen=True)
 class PINNBenchmarkConfig:
     seed: int = 0
-    outer_steps: int = 30
+    outer_steps: int = 100
     eval_every: int = 10
-    grid_size: int = 10
+    grid_size: int = 16
     input_dim: int = 2
-    hidden_layers: int = 6
-    hidden_dim: int = 64
+    hidden_layers: int = 128
+    hidden_dim: int = 256
     activation: str = "tanh"
     output_dim: int = 1
     target_max_abs_error: float = 1e-4
