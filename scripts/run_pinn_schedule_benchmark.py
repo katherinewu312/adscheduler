@@ -202,6 +202,10 @@ def _print_result(result, *, indent: str = "") -> None:
         if result.iterations_to_target_error is not None
         else "not reached"
     )
+    time_to_target_ms = _format_optional_ms(result.time_to_target_error_sec)
+    time_to_target_with_compile_ms = _format_optional_ms(
+        result.time_to_target_error_with_compile_sec
+    )
     peak_device = (
         f"{result.peak_device_memory_mb:.2f}"
         if result.peak_device_memory_mb is not None
@@ -212,6 +216,8 @@ def _print_result(result, *, indent: str = "") -> None:
     print(f"{indent}final_max_abs_error: {result.final_max_abs_error:.6e}")
     print(f"{indent}best_max_abs_error: {result.best_max_abs_error:.6e}")
     print(f"{indent}iterations_to_target_error: {iters_to_target}")
+    print(f"{indent}time_to_target_error_ms: {time_to_target_ms}")
+    print(f"{indent}time_to_target_error_with_compile_ms: {time_to_target_with_compile_ms}")
     print(f"{indent}loss: {result.loss:.6f}")
     print(f"{indent}avg_step_time_ms: {result.avg_step_time_sec * 1e3:.3f}")
     print(f"{indent}p50_step_time_ms: {result.p50_step_time_sec * 1e3:.3f}")
@@ -224,6 +230,10 @@ def _print_result(result, *, indent: str = "") -> None:
     print(f"{indent}ir_num_higher_order_sites: {result.ir_summary.num_higher_order_sites}")
     print(f"{indent}output: {result.output_summary}")
     print()
+
+
+def _format_optional_ms(value_sec: float | None) -> str:
+    return "not reached" if value_sec is None else f"{value_sec * 1e3:.3f}"
 
 
 if __name__ == "__main__":

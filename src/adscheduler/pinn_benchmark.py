@@ -74,6 +74,8 @@ class PINNScheduleBenchmarkResult:
     final_max_abs_error: float
     best_max_abs_error: float
     iterations_to_target_error: int | None
+    time_to_target_error_sec: float | None
+    time_to_target_error_with_compile_sec: float | None
     eval_history: list[tuple[int, float]]
     loss: float
     output_summary: str
@@ -428,6 +430,8 @@ def _run_pinn_schedule_with_state(
 
     timings: list[float] = []
     eval_history: list[tuple[int, float]] = []
+    cumulative_step_time_sec = 0.0
+    time_to_target_error_sec: float | None = None
     best_error = float("inf")
     final_error = float("inf")
     output = compiled_fn(params, sample_points)
@@ -436,13 +440,17 @@ def _run_pinn_schedule_with_state(
         reference = _block_tree(compiled_reference(params, points))
         start = time.perf_counter()
         output = _block_tree(compiled_fn(params, points))
-        timings.append(time.perf_counter() - start)
+        step_time_sec = time.perf_counter() - start
+        timings.append(step_time_sec)
+        cumulative_step_time_sec += step_time_sec
 
         if step % config.eval_every == 0 or step == config.outer_steps:
             error = _tree_max_abs_error(output, reference)
             final_error = error
             best_error = min(best_error, error)
             eval_history.append((step, error))
+            if time_to_target_error_sec is None and error <= config.target_max_abs_error:
+                time_to_target_error_sec = cumulative_step_time_sec
 
     timings_arr = np.asarray(timings, dtype=np.float64)
     iterations_to_target = next(
@@ -466,6 +474,12 @@ def _run_pinn_schedule_with_state(
         final_max_abs_error=final_error,
         best_max_abs_error=best_error,
         iterations_to_target_error=iterations_to_target,
+        time_to_target_error_sec=time_to_target_error_sec,
+        time_to_target_error_with_compile_sec=(
+            compile_overhead_sec + time_to_target_error_sec
+            if time_to_target_error_sec is not None
+            else None
+        ),
         eval_history=eval_history,
         loss=loss,
         output_summary=_summarize_output(output),

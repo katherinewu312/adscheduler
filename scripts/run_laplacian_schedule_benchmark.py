@@ -158,6 +158,10 @@ def main() -> None:
             if result.iterations_to_target_error is not None
             else "not reached"
         )
+        time_to_target_ms = _format_optional_ms(result.time_to_target_error_sec)
+        time_to_target_with_compile_ms = _format_optional_ms(
+            result.time_to_target_error_with_compile_sec
+        )
         peak_device = (
             f"{result.peak_device_memory_mb:.2f}"
             if result.peak_device_memory_mb is not None
@@ -167,6 +171,8 @@ def main() -> None:
         print(f"  final_max_abs_error: {result.final_max_abs_error:.6e}")
         print(f"  best_max_abs_error: {result.best_max_abs_error:.6e}")
         print(f"  iterations_to_target_error: {iters_to_target}")
+        print(f"  time_to_target_error_ms: {time_to_target_ms}")
+        print(f"  time_to_target_error_with_compile_ms: {time_to_target_with_compile_ms}")
         print(f"  output_mean: {result.output_mean:.6f}")
         print(f"  output_min: {result.output_min:.6f}")
         print(f"  output_max: {result.output_max:.6f}")
@@ -189,6 +195,10 @@ def main() -> None:
             if auto.iterations_to_target_error is not None
             else "not reached"
         )
+        time_to_target_ms = _format_optional_ms(auto.time_to_target_error_sec)
+        time_to_target_with_compile_ms = _format_optional_ms(
+            auto.time_to_target_error_with_compile_sec
+        )
         peak_device = (
             f"{auto.peak_device_memory_mb:.2f}"
             if auto.peak_device_memory_mb is not None
@@ -201,6 +211,8 @@ def main() -> None:
         print(f"  final_max_abs_error: {auto.final_max_abs_error:.6e}")
         print(f"  best_max_abs_error: {auto.best_max_abs_error:.6e}")
         print(f"  iterations_to_target_error: {iters_to_target}")
+        print(f"  time_to_target_error_ms: {time_to_target_ms}")
+        print(f"  time_to_target_error_with_compile_ms: {time_to_target_with_compile_ms}")
         print(f"  avg_step_time_ms: {auto.avg_step_time_sec * 1e3:.3f}")
         print(f"  p50_step_time_ms: {auto.p50_step_time_sec * 1e3:.3f}")
         print(f"  p90_step_time_ms: {auto.p90_step_time_sec * 1e3:.3f}")
@@ -245,6 +257,10 @@ def main() -> None:
     if args.json:
         print("=== Laplacian Benchmark JSON ===")
         print(json.dumps(laplacian_evaluation_report_to_dict(report), indent=2))
+
+
+def _format_optional_ms(value_sec: float | None) -> str:
+    return "not reached" if value_sec is None else f"{value_sec * 1e3:.3f}"
 
 
 if __name__ == "__main__":

@@ -73,6 +73,8 @@ class LaplacianScheduleBenchmarkResult:
     final_max_abs_error: float
     best_max_abs_error: float
     iterations_to_target_error: int | None
+    time_to_target_error_sec: float | None
+    time_to_target_error_with_compile_sec: float | None
     eval_history: list[tuple[int, float]]
     output_mean: float
     output_min: float
@@ -438,6 +440,8 @@ def _run_laplacian_schedule_with_state(
 
     step_times: list[float] = []
     eval_history: list[tuple[int, float]] = []
+    cumulative_step_time_sec = 0.0
+    time_to_target_error_sec: float | None = None
     final_output = compiled_fn(params, sample_points)
     final_output = _block_tree(final_output)
     peak_host_memory_mb = _read_peak_host_memory_mb()
@@ -447,7 +451,9 @@ def _run_laplacian_schedule_with_state(
         start = time.perf_counter()
         output = compiled_fn(params, points)
         output = _block_tree(output)
-        step_times.append(time.perf_counter() - start)
+        step_time_sec = time.perf_counter() - start
+        step_times.append(step_time_sec)
+        cumulative_step_time_sec += step_time_sec
         final_output = output
         peak_host_memory_mb = max(peak_host_memory_mb, _read_peak_host_memory_mb())
         current_device = _read_peak_device_memory_mb()
@@ -460,7 +466,10 @@ def _run_laplacian_schedule_with_state(
 
         if step_idx % config.eval_every == 0 or step_idx == config.outer_steps:
             ref = _block_tree(reference_fn(params, points))
-            eval_history.append((step_idx, _max_abs_error(output, ref)))
+            error = _max_abs_error(output, ref)
+            eval_history.append((step_idx, error))
+            if time_to_target_error_sec is None and error <= config.target_max_abs_error:
+                time_to_target_error_sec = cumulative_step_time_sec
 
     step_times_arr = np.asarray(step_times, dtype=np.float64)
     final_error = eval_history[-1][1]
@@ -486,6 +495,12 @@ def _run_laplacian_schedule_with_state(
         final_max_abs_error=final_error,
         best_max_abs_error=best_error,
         iterations_to_target_error=iterations_to_target,
+        time_to_target_error_sec=time_to_target_error_sec,
+        time_to_target_error_with_compile_sec=(
+            compile_overhead_sec + time_to_target_error_sec
+            if time_to_target_error_sec is not None
+            else None
+        ),
         eval_history=eval_history,
         output_mean=float(np.mean(final_arr)),
         output_min=float(np.min(final_arr)),
