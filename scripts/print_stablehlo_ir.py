@@ -6,29 +6,16 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from adscheduler.laplacian_benchmark import (  # noqa: E402
-    LaplacianBenchmarkConfig,
-    available_laplacian_schedule_names,
-)
-from adscheduler.pinn_benchmark import (  # noqa: E402
-    PINNBenchmarkConfig,
-    available_pinn_schedule_names,
-)
 from adscheduler.stablehlo_passes import (  # noqa: E402
     StableHLOProgram,
-    _make_laplacian_lowering_args,
-    _make_pinn_lowering_args,
     available_stablehlo_pass_names,
     default_stablehlo_pass_names,
-    lower_laplacian_schedule_to_stablehlo,
-    lower_pinn_schedule_to_stablehlo,
     lower_to_stablehlo,
     run_stablehlo_transform_pipeline,
 )
@@ -46,9 +33,6 @@ class IRTarget:
 
 
 def parse_args() -> argparse.Namespace:
-    laplacian_defaults = LaplacianBenchmarkConfig(outer_steps=1)
-    pinn_defaults = PINNBenchmarkConfig(outer_steps=1)
-
     parser = argparse.ArgumentParser(
         description="Print or write StableHLO IR for derivative benchmark workloads.",
     )
@@ -59,20 +43,6 @@ def parse_args() -> argparse.Namespace:
         choices=available_derivative_workload_names(),
         dest="workloads",
         help="Named derivative workload to lower. Repeat for multiple.",
-    )
-    parser.add_argument(
-        "--laplacian-schedule",
-        action="append",
-        choices=available_laplacian_schedule_names(),
-        dest="laplacian_schedules",
-        help="Laplacian schedule to lower. Repeat for multiple.",
-    )
-    parser.add_argument(
-        "--pinn-schedule",
-        action="append",
-        choices=available_pinn_schedule_names(),
-        dest="pinn_schedules",
-        help="PINN schedule to lower. Repeat for multiple.",
     )
     parser.add_argument(
         "--pass",
@@ -105,19 +75,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="When --output-dir is used, also print IR to stdout.",
     )
-
-    parser.add_argument("--laplacian-num-points", type=int, default=laplacian_defaults.num_points)
-    parser.add_argument("--laplacian-input-dim", type=int, default=laplacian_defaults.input_dim)
-    parser.add_argument(
-        "--laplacian-hidden-layers",
-        type=int,
-        default=laplacian_defaults.hidden_layers,
-    )
-    parser.add_argument("--laplacian-hidden-dim", type=int, default=laplacian_defaults.hidden_dim)
-
-    parser.add_argument("--pinn-grid-size", type=int, default=pinn_defaults.grid_size)
-    parser.add_argument("--pinn-hidden-layers", type=int, default=pinn_defaults.hidden_layers)
-    parser.add_argument("--pinn-hidden-dim", type=int, default=pinn_defaults.hidden_dim)
     return parser.parse_args()
 
 
@@ -166,38 +123,6 @@ def _selected_targets(args: argparse.Namespace) -> list[IRTarget]:
             workload.args,
         )
         targets.append(IRTarget(workload.name, program, workload.args))
-
-    laplacian_config = LaplacianBenchmarkConfig(
-        seed=args.seed,
-        outer_steps=1,
-        num_points=args.laplacian_num_points,
-        input_dim=args.laplacian_input_dim,
-        hidden_layers=args.laplacian_hidden_layers,
-        hidden_dim=args.laplacian_hidden_dim,
-    )
-    for schedule_name in args.laplacian_schedules or ():
-        program = lower_laplacian_schedule_to_stablehlo(
-            schedule_name,
-            config=laplacian_config,
-        )
-        targets.append(
-            IRTarget(
-                program.name,
-                program,
-                _make_laplacian_lowering_args(laplacian_config),
-            )
-        )
-
-    pinn_config = PINNBenchmarkConfig(
-        seed=args.seed,
-        outer_steps=1,
-        grid_size=args.pinn_grid_size,
-        hidden_layers=args.pinn_hidden_layers,
-        hidden_dim=args.pinn_hidden_dim,
-    )
-    for schedule_name in args.pinn_schedules or ():
-        program = lower_pinn_schedule_to_stablehlo(schedule_name, config=pinn_config)
-        targets.append(IRTarget(program.name, program, _make_pinn_lowering_args(pinn_config)))
 
     if not targets:
         workload = make_derivative_workload("mlp_laplacian_hessian", seed=args.seed)

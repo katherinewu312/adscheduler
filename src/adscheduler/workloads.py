@@ -8,9 +8,6 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import jet
 
-from adscheduler.laplacian_benchmark import LaplacianBenchmarkConfig
-from adscheduler.pinn_benchmark import PINNBenchmarkConfig
-
 Array = jax.Array
 
 '''
@@ -28,6 +25,33 @@ Poisson PINN benchmark:
   compute gradient of that loss wrt params
   output = scalar loss + parameter-gradient tree
 '''
+
+
+@dataclass(frozen=True)
+class LaplacianBenchmarkConfig:
+    seed: int = 0
+    outer_steps: int = 100
+    eval_every: int = 10
+    num_points: int = 256
+    input_dim: int = 3
+    hidden_dim: int = 256
+    hidden_layers: int = 128
+    activation: str = "tanh"
+    target_max_abs_error: float = 1e-4
+
+
+@dataclass(frozen=True)
+class PINNBenchmarkConfig:
+    seed: int = 0
+    outer_steps: int = 100
+    eval_every: int = 10
+    grid_size: int = 16
+    input_dim: int = 2
+    hidden_layers: int = 128
+    hidden_dim: int = 256
+    activation: str = "tanh"
+    output_dim: int = 1
+    target_max_abs_error: float = 1e-4
 
 
 @dataclass(frozen=True)
@@ -102,14 +126,6 @@ def trace_derivative_workloads(
     }
 
 
-def _make_mlp_laplacian_workload(seed: int) -> DerivativeWorkload:
-    return _make_mlp_laplacian_strategy_workload(
-        seed,
-        name="mlp_laplacian",
-        strategy="hessian",
-    )
-
-
 def _make_mlp_laplacian_hessian_workload(seed: int) -> DerivativeWorkload:
     return _make_mlp_laplacian_strategy_workload(
         seed,
@@ -131,14 +147,6 @@ def _make_mlp_laplacian_jet_workload(seed: int) -> DerivativeWorkload:
         seed,
         name="mlp_laplacian_jet",
         strategy="jet",
-    )
-
-
-def _make_poisson_pinn_workload(seed: int) -> DerivativeWorkload:
-    return _make_poisson_pinn_strategy_workload(
-        seed,
-        name="poisson_pinn",
-        strategy="hessian",
     )
 
 
@@ -398,11 +406,9 @@ def _init_mlp_params(
 
 
 _WORKLOAD_BUILDERS: dict[str, Callable[[int], DerivativeWorkload]] = {
-    "mlp_laplacian": _make_mlp_laplacian_workload,
     "mlp_laplacian_hessian": _make_mlp_laplacian_hessian_workload,
     "mlp_laplacian_jvp_grad": _make_mlp_laplacian_jvp_grad_workload,
     "mlp_laplacian_jet": _make_mlp_laplacian_jet_workload,
-    "poisson_pinn": _make_poisson_pinn_workload,
     "poisson_pinn_hessian": _make_poisson_pinn_hessian_workload,
     "poisson_pinn_jvp_grad": _make_poisson_pinn_jvp_grad_workload,
     "poisson_pinn_jet": _make_poisson_pinn_jet_workload,

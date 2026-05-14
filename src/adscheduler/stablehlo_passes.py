@@ -8,16 +8,6 @@ from typing import Any, Callable, Sequence
 import jax
 import jax.numpy as jnp
 
-from adscheduler.laplacian_benchmark import (
-    LaplacianBenchmarkConfig,
-    build_laplacian_schedule_fn,
-    normalize_laplacian_schedule_names,
-)
-from adscheduler.pinn_benchmark import (
-    PINNBenchmarkConfig,
-    build_pinn_schedule_fn,
-    normalize_pinn_schedule_names,
-)
 from adscheduler.workloads import make_derivative_workload
 
 
@@ -133,19 +123,6 @@ class StableHLOTransformResult:
     transform_results: list[StableHLOPassResult]
 
 
-@dataclass(frozen=True)
-class StableHLOCompilerScore:
-    program_name: str
-    score: float
-    estimated_optimized_operations: float
-    total_operations: int
-    laplacian_recurrence_rewrites: int
-    constant_foldable_operations: int
-    structural_zero_eliminations: int
-    mixed_partial_cse_rewrites: int
-    symmetric_kernel_rewrites: int
-
-
 def lower_to_stablehlo(
     name: str,
     fn: Callable[..., Any],
@@ -166,36 +143,6 @@ def lower_workload_to_stablehlo(
 ) -> StableHLOProgram:
     workload = make_derivative_workload(workload_name, seed=seed)
     return lower_to_stablehlo(workload.name, workload.derivative_task, workload.args)
-
-
-def lower_laplacian_schedule_to_stablehlo(
-    schedule_name: str,
-    *,
-    config: LaplacianBenchmarkConfig | None = None,
-) -> StableHLOProgram:
-    selected_schedule = normalize_laplacian_schedule_names((schedule_name,))[0]
-    cfg = config or LaplacianBenchmarkConfig(outer_steps=1)
-    params, points = _make_laplacian_lowering_args(cfg)
-    return lower_to_stablehlo(
-        f"laplacian_{selected_schedule}",
-        build_laplacian_schedule_fn(selected_schedule),
-        (params, points),
-    )
-
-
-def lower_pinn_schedule_to_stablehlo(
-    schedule_name: str,
-    *,
-    config: PINNBenchmarkConfig | None = None,
-) -> StableHLOProgram:
-    selected_schedule = normalize_pinn_schedule_names((schedule_name,))[0]
-    cfg = config or PINNBenchmarkConfig(outer_steps=1)
-    params, points = _make_pinn_lowering_args(cfg)
-    return lower_to_stablehlo(
-        f"pinn_{selected_schedule}",
-        build_pinn_schedule_fn(selected_schedule),
-        (params, points),
-    )
 
 
 def run_stablehlo_pass_pipeline(
@@ -237,7 +184,7 @@ def run_stablehlo_transform_pipeline(
 ) -> StableHLOTransformResult:
     """Run source-level StableHLO optimization passes.
 
-    The analysis pipeline is intentionally preserved for scoring. This function
+    The analysis pipeline is intentionally preserved for reporting. This function
     additionally rewrites the StableHLO module with conservative SSA transforms
     that keep the module in StableHLO text form so another backend can compile it.
 
@@ -245,7 +192,6 @@ def run_stablehlo_transform_pipeline(
       1. replace known nested input-AD Laplacians with direct tanh-MLP Laplacian recurrences
       2. fold derivative-generated scalar/splat constants
       3. eliminate structurally zero tangent/cotangent lanes exposed by constant propagation
-      4. optionally run metadata-dependent experimental transforms
     """
 
     selected_passes = tuple(passes or default_stablehlo_pass_names())
@@ -272,22 +218,6 @@ def run_stablehlo_transform_pipeline(
 
     if "structural_zero_elimination" in selected_passes:
         stablehlo_text, pass_result = _eliminate_structural_zeros(stablehlo_text)
-        current_program = StableHLOProgram(
-            name=current_program.name,
-            stablehlo_text=stablehlo_text,
-        )
-        transform_results.append(pass_result)
-
-    if "mixed_partial_cse" in selected_passes:
-        stablehlo_text, pass_result = _eliminate_mixed_partial_equivalents(stablehlo_text)
-        current_program = StableHLOProgram(
-            name=current_program.name,
-            stablehlo_text=stablehlo_text,
-        )
-        transform_results.append(pass_result)
-
-    if "symmetric_kernel_rewriting" in selected_passes:
-        stablehlo_text, pass_result = _rewrite_symmetric_derivative_kernels(stablehlo_text)
         current_program = StableHLOProgram(
             name=current_program.name,
             stablehlo_text=stablehlo_text,
@@ -334,62 +264,6 @@ def format_stablehlo_pipeline_report(result: StableHLOPipelineResult) -> str:
             for detail in pass_result.details:
                 lines.append(f"      - {detail}")
     return "\n".join(lines)
-
-
-def score_stablehlo_optimization_surface(
-    result: StableHLOPipelineResult,
-) -> StableHLOCompilerScore:
-    """Heuristic score for choosing IR with visible AD-aware optimization surface.
-
-    Lower is better. This rewards optimization opportunities that are usually
-    not visible to XLA as derivative semantics: derivative-generated constants,
-    mixed-partial equivalences, and symmetric derivative kernels.
-    """
-
-    pass_metrics = {pass_result.pass_name: pass_result.metrics for pass_result in result.pass_results}
-    laplacian_recurrence_rewrites = int(
-        pass_metrics.get("tanh_mlp_laplacian_recurrence", {}).get("rewritable_programs", 0)
-    )
-    constant_foldable_operations = int(
-        pass_metrics.get("derivative_constant_propagation", {}).get(
-            "foldable_operations",
-            0,
-        )
-    )
-    structural_zero_eliminations = int(
-        pass_metrics.get("structural_zero_elimination", {}).get(
-            "eliminated_operations",
-            0,
-        )
-    )
-    mixed_partial_cse_rewrites = int(
-        pass_metrics.get("mixed_partial_cse", {}).get("rewritable_equivalents", 0)
-    )
-    symmetric_kernel_rewrites = int(
-        pass_metrics.get("symmetric_kernel_rewriting", {}).get("rewritable_kernels", 0)
-    )
-
-    estimated_optimized_operations = max(
-        0.0,
-        result.total_operations
-        - 500.00 * laplacian_recurrence_rewrites
-        - 0.75 * constant_foldable_operations
-        - 1.25 * structural_zero_eliminations
-        - 2.00 * mixed_partial_cse_rewrites
-        - 3.00 * symmetric_kernel_rewrites,
-    )
-    score = estimated_optimized_operations
-    return StableHLOCompilerScore(
-        program_name=result.program_name,
-        score=score,
-        estimated_optimized_operations=estimated_optimized_operations,
-        total_operations=result.total_operations,
-        laplacian_recurrence_rewrites=laplacian_recurrence_rewrites,
-        constant_foldable_operations=constant_foldable_operations,
-        structural_zero_eliminations=structural_zero_eliminations,
-        mixed_partial_cse_rewrites=mixed_partial_cse_rewrites,
-        symmetric_kernel_rewrites=symmetric_kernel_rewrites,
-    )
 
 
 def _tanh_mlp_laplacian_recurrence_pass(program: StableHLOProgram) -> StableHLOPassResult:
@@ -449,41 +323,6 @@ def _structural_zero_elimination_pass(program: StableHLOProgram) -> StableHLOPas
             "eliminated_operations": result.metrics["eliminated_operations"],
             "zero_rewrites": result.metrics["zero_rewrites"],
             "alias_rewrites": result.metrics["alias_rewrites"],
-        },
-        details=result.details,
-    )
-
-
-def _mixed_partial_cse_pass(program: StableHLOProgram) -> StableHLOPassResult:
-    _, result = _eliminate_mixed_partial_equivalents(program.stablehlo_text)
-    return StableHLOPassResult(
-        pass_name="mixed_partial_cse",
-        summary=(
-            "Finds mixed-partial derivative equivalents when derivative index metadata "
-            "is preserved in StableHLO locations or names."
-        ),
-        metrics={
-            "metadata_tags": result.metrics["metadata_tags"],
-            "rewritable_equivalents": result.metrics["rewritten_equivalents"],
-            "skipped_missing_metadata": result.metrics["skipped_missing_metadata"],
-        },
-        details=result.details,
-    )
-
-
-def _symmetric_kernel_rewriting_pass(program: StableHLOProgram) -> StableHLOPassResult:
-    _, result = _rewrite_symmetric_derivative_kernels(program.stablehlo_text)
-    return StableHLOPassResult(
-        pass_name="symmetric_kernel_rewriting",
-        summary=(
-            "Finds Hessian/symmetric derivative kernels that could use a symmetric "
-            "kernel representation when the IR exposes symmetry metadata."
-        ),
-        metrics={
-            "symmetric_kernel_candidates": result.metrics["symmetric_kernel_candidates"],
-            "rewritable_kernels": result.metrics["rewritten_kernels"],
-            "skipped_no_portable_kernel": result.metrics["skipped_no_portable_kernel"],
-            "skipped_missing_metadata": result.metrics["skipped_missing_metadata"],
         },
         details=result.details,
     )
@@ -761,59 +600,6 @@ def _eliminate_structural_zeros(
     )
 
 
-def _eliminate_mixed_partial_equivalents(
-    stablehlo_text: str,
-) -> tuple[str, StableHLOPassResult]:
-    tags = _mixed_partial_tags(stablehlo_text)
-    details: list[str] = []
-    if not tags:
-        details.append(
-            "No mixed-partial derivative-index metadata found in StableHLO text; "
-            "leaving IR unchanged."
-        )
-
-    return stablehlo_text, StableHLOPassResult(
-        pass_name="mixed_partial_cse_transform",
-        summary="Eliminates equivalent mixed partials when derivative-index tags are available.",
-        metrics={
-            "metadata_tags": len(tags),
-            "rewritten_equivalents": 0,
-            "skipped_missing_metadata": 1 if not tags else 0,
-        },
-        details=details,
-    )
-
-
-def _rewrite_symmetric_derivative_kernels(
-    stablehlo_text: str,
-) -> tuple[str, StableHLOPassResult]:
-    dot_general_count = stablehlo_operation_histogram(stablehlo_text).get(
-        "stablehlo.dot_general",
-        0,
-    )
-    symmetry_tags = _symmetry_tags(stablehlo_text)
-    details: list[str] = []
-    if not symmetry_tags:
-        details.append(
-            "No Hessian/symmetric operand metadata found; StableHLO has no portable "
-            "symmetric-matrix kernel op to target safely."
-        )
-
-    return stablehlo_text, StableHLOPassResult(
-        pass_name="symmetric_kernel_rewriting_transform",
-        summary="Rewrites Hessian/symmetric matmul kernels when a safe StableHLO target exists.",
-        metrics={
-            "dot_general_operations": dot_general_count,
-            "symmetry_metadata_tags": len(symmetry_tags),
-            "symmetric_kernel_candidates": 0,
-            "rewritten_kernels": 0,
-            "skipped_no_portable_kernel": 1,
-            "skipped_missing_metadata": 1 if not symmetry_tags else 0,
-        },
-        details=details,
-    )
-
-
 def _rewrite_tanh_mlp_laplacian_recurrence(
     program: StableHLOProgram,
     *,
@@ -892,10 +678,10 @@ def _build_tanh_mlp_laplacian_recurrence_fn():
         _, _, laplacian = _tanh_mlp_value_grad_laplacian(params, x)
         return laplacian
 
-    def scheduled_laplacian(params, points):
+    def laplacian_task(params, points):
         return jax.vmap(lambda point: laplacian_at_point(params, point))(points)
 
-    return scheduled_laplacian
+    return laplacian_task
 
 
 def _build_tanh_poisson_pinn_recurrence_fn():
@@ -929,10 +715,10 @@ def _build_tanh_poisson_pinn_recurrence_fn():
         residuals = jax.vmap(lambda coord: poisson_residual_at_point(params, coord))(points)
         return jnp.mean(residuals**2)
 
-    def scheduled_pinn_task(params, points):
+    def pinn_task(params, points):
         return jax.value_and_grad(pinn_loss)(params, points)
 
-    return scheduled_pinn_task
+    return pinn_task
 
 
 def _tanh_mlp_value_grad_laplacian(params, x):
@@ -1113,30 +899,6 @@ def _evaluate_binary_constant(
     return None
 
 
-def _mixed_partial_tags(stablehlo_text: str) -> list[str]:
-    patterns = (
-        r"mixed[_-]?partial\[[^\]]+\]",
-        r"d2[a-zA-Z0-9_]*_d[a-zA-Z0-9]+_d[a-zA-Z0-9]+",
-        r"hessian\[[^\]]+\]",
-    )
-    tags: list[str] = []
-    for pattern in patterns:
-        tags.extend(re.findall(pattern, stablehlo_text, flags=re.IGNORECASE))
-    return sorted(set(tags))
-
-
-def _symmetry_tags(stablehlo_text: str) -> list[str]:
-    patterns = (
-        r"hessian",
-        r"symmetric",
-        r"symm",
-    )
-    tags: list[str] = []
-    for pattern in patterns:
-        tags.extend(re.findall(pattern, stablehlo_text, flags=re.IGNORECASE))
-    return sorted(set(tags))
-
-
 def _nested_region_line_mask(lines: Sequence[str]) -> list[bool]:
     mask: list[bool] = []
     in_nested_region = False
@@ -1183,24 +945,8 @@ def _operation_operand_values(line: str) -> list[str]:
     return SSA_VALUE_RE.findall(rhs)
 
 
-def _make_laplacian_lowering_args(config: LaplacianBenchmarkConfig):
-    from adscheduler.laplacian_benchmark import _initialize_laplacian_state
-
-    params, _, sample_points = _initialize_laplacian_state(config)
-    return params, sample_points
-
-
-def _make_pinn_lowering_args(config: PINNBenchmarkConfig):
-    from adscheduler.pinn_benchmark import _initialize_pinn_state
-
-    params, _, sample_points = _initialize_pinn_state(config)
-    return params, sample_points
-
-
 _PASS_REGISTRY: dict[str, Callable[[StableHLOProgram], StableHLOPassResult]] = {
     "tanh_mlp_laplacian_recurrence": _tanh_mlp_laplacian_recurrence_pass,
     "derivative_constant_propagation": _derivative_constant_propagation_pass,
     "structural_zero_elimination": _structural_zero_elimination_pass,
-    "mixed_partial_cse": _mixed_partial_cse_pass,
-    "symmetric_kernel_rewriting": _symmetric_kernel_rewriting_pass,
 }
