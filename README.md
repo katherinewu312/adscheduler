@@ -1,4 +1,5 @@
 # Optimizations for Higher-Order Automatic Differentiation 
+Katherine Wu, CS 6787, Final Project Code
 
 ## Setup
 
@@ -15,11 +16,10 @@ pip3 install jax jaxlib numpy
 - `benchmarking/evaluate_laplacian.py`: benchmarking for MLP Laplacian.
 - `benchmarking/evaluate_poisson.py`: benchmarking for Poisson PINN.
 - `benchmarking/evaluate_pinn_convergence.py`: benchmarking for Poisson PINN training convergence using Adam.
-- `scripts/run_trace_analysis.py`: CLI for tracing derivative workloads and IR reports.
+- `scripts/run_trace_analysis.py`: CLI for tracing Jaxpr and IR reports.
 - `scripts/run_stablehlo_passes.py`: CLI for lowering to StableHLO and running analysis passes.
 - `scripts/print_stablehlo_ir.py`: CLI for printing or writing original and after compiler pass StableHLO `.mlir` files.
-- `scripts/run_workload_benchmark.py`: CLI for benchmarking derivative workload runtimes.
-- `stablehlo_ir/`: generated StableHLO dumps for inspecting original and after-pass IR.
+- `scripts/run_workload_benchmark.py`: CLI for benchmarking workload runtimes.
 
 ## Reproducing the results in the paper:
 
