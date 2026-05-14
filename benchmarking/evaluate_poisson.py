@@ -33,7 +33,6 @@ from adscheduler.stablehlo_passes import (
 )
 
 Array = jax.Array
-BenchmarkName = Literal["mlp_laplacian", "poisson_pinn"]
 StrategyName = Literal["hessian", "jvp_grad", "jet"]
 
 
@@ -65,7 +64,7 @@ class Workload:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the ICML paper hidden-width sweep for fixed AD methods.",
+        description="Run the Poisson PINN hidden-width sweep for fixed AD methods.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup-runs", type=int, default=3)
@@ -79,14 +78,6 @@ def parse_args() -> argparse.Namespace:
         help="Hidden width to benchmark. Repeat for multiple. Defaults to 128,256,384,512.",
     )
     parser.add_argument(
-        "--benchmark",
-        action="append",
-        choices=("mlp_laplacian", "poisson_pinn"),
-        dest="benchmarks",
-        default=None,
-        help="Benchmark to run. Repeat for multiple. Defaults to both.",
-    )
-    parser.add_argument(
         "--method",
         action="append",
         choices=("hessian", "jvp_grad", "jet"),
@@ -97,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "icml2025" / "paper_width_sweep_results.jsonl",
+        default=REPO_ROOT / "poisson_pinn_results.jsonl",
     )
     return parser.parse_args()
 
@@ -105,38 +96,33 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     widths = tuple(args.widths or (128, 256, 384, 512))
-    benchmarks = tuple(args.benchmarks or ("mlp_laplacian", "poisson_pinn"))
     methods = tuple(args.methods or ("hessian", "jvp_grad", "jet"))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("a", encoding="utf-8") as output:
-        for benchmark in benchmarks:
-            for width in widths:
-                for method in methods:
-                    result = run_one(
-                        benchmark=benchmark,
-                        hidden_width=width,
-                        method=method,
-                        seed=args.seed,
-                        warmup_runs=args.warmup_runs,
-                        runs=args.runs,
-                    )
-                    output.write(json.dumps(asdict(result)) + "\n")
-                    output.flush()
-                    print(json.dumps(asdict(result), indent=2), flush=True)
+        for width in widths:
+            for method in methods:
+                result = run_one(
+                    hidden_width=width,
+                    method=method,
+                    seed=args.seed,
+                    warmup_runs=args.warmup_runs,
+                    runs=args.runs,
+                )
+                output.write(json.dumps(asdict(result)) + "\n")
+                output.flush()
+                print(json.dumps(asdict(result), indent=2), flush=True)
 
 
 def run_one(
     *,
-    benchmark: BenchmarkName,
     hidden_width: int,
     method: StrategyName,
     seed: int,
     warmup_runs: int,
     runs: int,
 ) -> SweepResult:
-    workload = make_workload(
-        benchmark=benchmark,
+    workload = make_poisson_pinn_workload(
         hidden_width=hidden_width,
         method=method,
         seed=seed,
@@ -155,7 +141,7 @@ def run_one(
     if before.avg_runtime_ms is not None and after.avg_runtime_ms is not None:
         speedup = before.avg_runtime_ms / after.avg_runtime_ms
     return SweepResult(
-        benchmark=benchmark,
+        benchmark="poisson_pinn",
         hidden_width=hidden_width,
         method=method,
         before=before,
@@ -208,60 +194,6 @@ def benchmark_program(
         avg_runtime_ms=float(np.mean(timings_ms)),
         p50_runtime_ms=float(np.percentile(timings_ms, 50)),
         p90_runtime_ms=float(np.percentile(timings_ms, 90)),
-    )
-
-
-def make_workload(
-    *,
-    benchmark: BenchmarkName,
-    hidden_width: int,
-    method: StrategyName,
-    seed: int,
-) -> Workload:
-    if benchmark == "mlp_laplacian":
-        return make_mlp_laplacian_workload(hidden_width=hidden_width, method=method, seed=seed)
-    return make_poisson_pinn_workload(hidden_width=hidden_width, method=method, seed=seed)
-
-
-def make_mlp_laplacian_workload(
-    *,
-    hidden_width: int,
-    method: StrategyName,
-    seed: int,
-) -> Workload:
-    input_dim = 3
-    hidden_layers = 128
-    num_points = 256
-    params = init_mlp_params(
-        seed=seed,
-        layer_dims=tuple([input_dim] + [hidden_width] * hidden_layers + [1]),
-    )
-    points = jnp.linspace(
-        -1.0,
-        1.0,
-        num_points * input_dim,
-        dtype=jnp.float32,
-    ).reshape(num_points, input_dim)
-
-    def mlp_scalar(mlp_params, x):
-        activations = x
-        for weights, bias in mlp_params[:-1]:
-            activations = jnp.tanh(activations @ weights + bias)
-        final_weights, final_bias = mlp_params[-1]
-        return jnp.squeeze(activations @ final_weights + final_bias)
-
-    def laplacian_at_point(mlp_params, x):
-        scalar_fn = lambda z: mlp_scalar(mlp_params, z)
-        basis = jnp.eye(x.shape[0], dtype=x.dtype)
-        return laplacian_by_method(scalar_fn, x, basis, method)
-
-    def task(mlp_params, xs):
-        return jax.vmap(partial(laplacian_at_point, mlp_params))(xs)
-
-    return Workload(
-        name=f"mlp_laplacian_{method}_h{hidden_width}",
-        task=task,
-        args=(params, points),
     )
 
 

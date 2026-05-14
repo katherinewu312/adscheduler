@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "icml2025" / "pinn_convergence_results.json",
+        default=REPO_ROOT / "pinn_convergence_results.json",
     )
     parser.add_argument("--json", action="store_true", help="Print full JSON report.")
     return parser.parse_args()
